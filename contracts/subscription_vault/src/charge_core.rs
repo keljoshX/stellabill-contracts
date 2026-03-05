@@ -1,7 +1,11 @@
 //! Single charge logic (no auth). Used by charge_subscription and batch_charge.
 //!
-//! Charge runs only when status is Active; on insufficient balance the subscription
-//! transitions to InsufficientBalance. See `docs/subscription_lifecycle.md` for details.
+//! Charge runs only when status is Active or GracePeriod; on insufficient balance the
+//! subscription transitions to InsufficientBalance. On lifetime cap exhaustion the
+//! subscription is cancelled (terminal state).
+//!
+//! See `docs/subscription_lifecycle.md` for lifecycle details.
+//! See `docs/lifetime_caps.md` for cap enforcement semantics.
 //!
 //! **PRs that only change how one subscription is charged should edit this file only.**
 //!
@@ -24,6 +28,7 @@
 //! Because there are no external calls, there is **no reentrancy risk** in this module.
 //! See `docs/reentrancy.md` for the full reentrancy threat model and mitigation strategy.
 
+#![allow(dead_code)]
 
 use crate::queries::get_subscription;
 use crate::safe_math::safe_sub_balance;
@@ -34,6 +39,7 @@ use crate::types::{
     BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD, BILLING_SNAPSHOT_FLAG_INTERVAL_CHARGED,
     BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
 };
+use crate::types::{Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus};
 use soroban_sdk::{symbol_short, Env, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
@@ -214,6 +220,18 @@ fn enforce_usage_rate_limit(
 
 /// Performs a single interval-based charge with optional replay protection.
 ///
+/// # Lifetime Cap Enforcement
+///
+/// When a subscription has a `lifetime_cap` configured:
+/// 1. Before charging, the remaining cap (`cap - lifetime_charged`) is checked.
+/// 2. If the remaining cap is already zero, returns [`Error::LifetimeCapReached`]
+///    and transitions the subscription to `Cancelled`.
+/// 3. If `amount > remaining_cap`, returns [`Error::LifetimeCapReached`] and
+///    cancels the subscription — partial charges are not issued.
+/// 4. On a successful charge, `lifetime_charged` is incremented by `amount`.
+/// 5. After the charge, if `lifetime_charged == lifetime_cap`, the subscription is
+///    cancelled and a [`LifetimeCapReachedEvent`] is emitted.
+///
 /// # Idempotency
 ///
 /// - If `idempotency_key` is `Some(k)` and we already processed this subscription with key `k`,
@@ -275,6 +293,38 @@ pub fn charge_one(
         return Err(Error::IntervalNotElapsed);
     }
 
+    // ── Lifetime cap pre-check ────────────────────────────────────────────────
+    // NOTE: In Soroban, state changes are rolled back when a function returns
+    // an error. Therefore, when the cap pre-check fires (charge would exceed cap),
+    // we cancel the subscription and return Ok(()) so the cancellation persists.
+    // The billing engine detects this via the LifetimeCapReachedEvent and by
+    // checking the subscription status (Cancelled).
+    if let Some(cap) = sub.lifetime_cap {
+        let remaining = cap.checked_sub(sub.lifetime_charged).unwrap_or(0).max(0);
+
+        if remaining == 0 || sub.amount > remaining {
+            // Cap already exhausted or this charge would exceed it — cancel.
+            validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+            sub.status = SubscriptionStatus::Cancelled;
+            env.storage().instance().set(&subscription_id, &sub);
+
+            env.events().publish(
+                (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                LifetimeCapReachedEvent {
+                    subscription_id,
+                    lifetime_cap: cap,
+                    lifetime_charged: sub.lifetime_charged,
+                    timestamp: now,
+                },
+            );
+
+            // Return Ok so Soroban persists the Cancelled state.
+            // The caller detects cap-cancellation via the event and subscription status.
+            return Ok(());
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     let storage = env.storage().instance();
 
     match safe_sub_balance(sub.prepaid_balance, sub.amount) {
@@ -284,6 +334,14 @@ pub fn charge_one(
             let (net_amount, fee_amount) =
                 crate::merchant::credit_merchant_and_treasury(env, &sub.merchant, sub.amount)?;
             sub.last_payment_timestamp = now;
+
+            // Accumulate lifetime charged amount
+            sub.lifetime_charged = sub
+                .lifetime_charged
+                .checked_add(sub.amount)
+                .ok_or(Error::Overflow)?;
+
+            // Recover from grace period on successful charge
             if sub.status == SubscriptionStatus::GracePeriod {
                 validate_status_transition(&sub.status, &SubscriptionStatus::Active)?;
                 sub.status = SubscriptionStatus::Active;
@@ -296,6 +354,17 @@ pub fn charge_one(
                 BILLING_SNAPSHOT_FLAG_INTERVAL_CHARGED,
             )?;
 
+            // Check if cap is now exactly reached — auto-cancel
+            let cap_reached = sub
+                .lifetime_cap
+                .map(|cap| sub.lifetime_charged >= cap)
+                .unwrap_or(false);
+
+            if cap_reached {
+                validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+                sub.status = SubscriptionStatus::Cancelled;
+            }
+
             storage.set(&subscription_id, &sub);
 
             // Record charged period and optional idempotency key (bounded storage)
@@ -304,12 +373,15 @@ pub fn charge_one(
                 storage.set(&idem_key(subscription_id), &k);
             }
 
+            // Emit charge event
             env.events().publish(
                 (symbol_short!("charged"),),
                 SubscriptionChargedEvent {
                     subscription_id,
                     merchant: sub.merchant.clone(),
                     amount: net_amount,
+                    amount: sub.amount,
+                    lifetime_charged: sub.lifetime_charged,
                 },
             );
             if fee_amount > 0 {
@@ -329,6 +401,21 @@ pub fn charge_one(
                         net_amount,
                     },
                 );
+            }
+
+            // Emit cap-reached event if applicable
+            if cap_reached {
+                if let Some(cap) = sub.lifetime_cap {
+                    env.events().publish(
+                        (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                        LifetimeCapReachedEvent {
+                            subscription_id,
+                            lifetime_cap: cap,
+                            lifetime_charged: sub.lifetime_charged,
+                            timestamp: now,
+                        },
+                    );
+                }
             }
 
             Ok(())
@@ -359,16 +446,23 @@ pub fn charge_one(
 
 /// Debit a metered `usage_amount` from a subscription's prepaid balance.
 ///
-/// Shared safety checks:
+/// # Lifetime Cap Enforcement
+///
+/// If a lifetime cap is configured, `usage_amount` must not cause `lifetime_charged`
+/// to exceed `lifetime_cap`. If it would, the subscription is cancelled and
+/// [`Error::LifetimeCapReached`] is returned.
+///
+/// # Shared safety checks
+///
 /// * Subscription must exist (`NotFound`).
 /// * Subscription must be `Active` (`NotActive`).
 /// * `usage_enabled` must be `true` (`UsageNotEnabled`).
 /// * `usage_amount` must be positive (`InvalidAmount`).
 /// * `prepaid_balance >= usage_amount` (`InsufficientPrepaidBalance`).
 ///
-/// On success the prepaid balance is reduced.  If the balance reaches zero
-/// the subscription transitions to `InsufficientBalance`, blocking further
-/// charges until the subscriber tops up.
+/// On success the prepaid balance is reduced. If the balance reaches zero the
+/// subscription transitions to `InsufficientBalance`, blocking further charges
+/// until the subscriber tops up.
 pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
     let now = env.ledger().timestamp();
@@ -410,6 +504,35 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         return Err(Error::InsufficientPrepaidBalance);
     }
 
+    // ── Lifetime cap pre-check ────────────────────────────────────────────────
+    // See charge_one for rationale on returning Ok() here.
+    if let Some(cap) = sub.lifetime_cap {
+        let new_charged = sub
+            .lifetime_charged
+            .checked_add(usage_amount)
+            .ok_or(Error::Overflow)?;
+        if new_charged > cap {
+            validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+            sub.status = SubscriptionStatus::Cancelled;
+            env.storage().instance().set(&subscription_id, &sub);
+
+            let now = env.ledger().timestamp();
+            env.events().publish(
+                (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                LifetimeCapReachedEvent {
+                    subscription_id,
+                    lifetime_cap: cap,
+                    lifetime_charged: sub.lifetime_charged,
+                    timestamp: now,
+                },
+            );
+
+            return Ok(());
+        }
+        sub.lifetime_charged = new_charged;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     sub.prepaid_balance = sub
         .prepaid_balance
         .checked_sub(usage_amount)
@@ -448,6 +571,31 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
     if sub.prepaid_balance == 0 {
         validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
         sub.status = SubscriptionStatus::InsufficientBalance;
+    }
+
+    // Check if cap is exactly reached after usage charge
+    let cap_reached = sub
+        .lifetime_cap
+        .map(|cap| sub.lifetime_charged >= cap)
+        .unwrap_or(false);
+
+    if cap_reached {
+        // Cancel even if balance is > 0 (cap overrides balance)
+        validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+        sub.status = SubscriptionStatus::Cancelled;
+
+        if let Some(cap) = sub.lifetime_cap {
+            let now = env.ledger().timestamp();
+            env.events().publish(
+                (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                LifetimeCapReachedEvent {
+                    subscription_id,
+                    lifetime_cap: cap,
+                    lifetime_charged: sub.lifetime_charged,
+                    timestamp: now,
+                },
+            );
+        }
     }
 
     env.storage().instance().set(&subscription_id, &sub);

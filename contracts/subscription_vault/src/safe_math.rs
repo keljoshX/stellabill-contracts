@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::types::Error;
 
 /// Safely adds two i128 values, preventing overflow.
 ///

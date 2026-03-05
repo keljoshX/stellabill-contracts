@@ -191,6 +191,23 @@
                             },
                             {
                               "key": {
+                                "symbol": "lifetime_cap"
+                              },
+                              "val": "void"
+                            },
+                            {
+                              "key": {
+                                "symbol": "lifetime_charged"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "merchant"
                               },
                               "val": {

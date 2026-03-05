@@ -3,6 +3,7 @@
 //! **PRs that only add or change read-only/query behavior should edit this file only.**
 
 use crate::types::{BillingPeriodSnapshot, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
+use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 pub fn get_subscription(env: &Env, subscription_id: u32) -> Result<Subscription, Error> {
@@ -107,6 +108,29 @@ pub fn compute_next_charge_info(subscription: &Subscription) -> NextChargeInfo {
         next_charge_timestamp,
         is_charge_expected,
     }
+}
+
+/// Returns lifetime cap information for a subscription.
+///
+/// This is a readonly helper exposing cap tracking state for off-chain dashboards.
+/// Returns `Ok(CapInfo)` for both capped and uncapped subscriptions.
+pub fn get_cap_info(env: &Env, subscription_id: u32) -> Result<CapInfo, Error> {
+    let sub = get_subscription(env, subscription_id)?;
+
+    let (remaining_cap, cap_reached) = match sub.lifetime_cap {
+        Some(cap) => {
+            let remaining = cap.saturating_sub(sub.lifetime_charged).max(0);
+            (Some(remaining), sub.lifetime_charged >= cap)
+        }
+        None => (None, false),
+    };
+
+    Ok(CapInfo {
+        lifetime_cap: sub.lifetime_cap,
+        lifetime_charged: sub.lifetime_charged,
+        remaining_cap,
+        cap_reached,
+    })
 }
 
 /// Result of a paginated query for subscriptions by subscriber.
