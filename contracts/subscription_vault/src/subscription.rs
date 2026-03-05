@@ -1,10 +1,26 @@
-//! Subscription lifecycle: create, deposit.
+//! Subscription lifecycle: create, deposit, withdraw, cancel.
 //!
 //! See `docs/subscription_lifecycle.md` for the full lifecycle and state machine.
 //!
 //! **PRs that only change subscription lifecycle or billing should edit this file only.**
+//!
+//! # Reentrancy Protection
+//!
+//! This module contains two critical external calls to the token contract:
+//! - `do_deposit_funds`: transfers tokens FROM subscriber TO contract
+//! - `do_withdraw_subscriber_funds`: transfers tokens FROM contract TO subscriber
+//!
+//! Both functions follow the **Checks-Effects-Interactions (CEI)** pattern:
+//! 1. **Checks**: Validate inputs and authorization
+//! 2. **Effects**: Update internal contract state (prepaid_balance) in storage
+//! 3. **Interactions**: Call token.transfer() AFTER state is persisted
+//!
+//! This ordering ensures that even if the token contract calls back into our contract,
+//! the contract state will already be consistent and the attacker cannot exploit the
+//! temporal inconsistency.
+//!
+//! See `docs/reentrancy.md` for full details on reentrancy threats and mitigations.
 
-#![allow(dead_code)]
 
 use crate::queries::get_subscription;
 use crate::safe_math::{safe_add_balance, validate_non_negative};
@@ -72,6 +88,9 @@ pub fn do_deposit_funds(
 ) -> Result<(), Error> {
     subscriber.require_auth();
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // CHECKS: Validate all preconditions before any state mutations
+    // ──────────────────────────────────────────────────────────────────────────
     let min_topup: i128 = crate::admin::get_min_topup(env)?;
     if amount < min_topup {
         return Err(Error::BelowMinimumTopup);
@@ -79,16 +98,25 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    sub.prepaid_balance = safe_add_balance(sub.prepaid_balance, amount)?;
     let token_addr: Address = env
         .storage()
         .instance()
         .get(&Symbol::new(env, "token"))
         .ok_or(Error::NotInitialized)?;
-    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
 
-    token_client.transfer(&subscriber, &env.current_contract_address(), &amount);
+    // ──────────────────────────────────────────────────────────────────────────
+    // EFFECTS: Update internal state before external interactions (CEI pattern)
+    // ──────────────────────────────────────────────────────────────────────────
+    sub.prepaid_balance = safe_add_balance(sub.prepaid_balance, amount)?;
     env.storage().instance().set(&subscription_id, &sub);
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // INTERACTIONS: Only after internal state is consistent, call token contract
+    // ──────────────────────────────────────────────────────────────────────────
+    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
+    token_client.transfer(&subscriber, &env.current_contract_address(), &amount);
+
+    // Emit event after successful transfer
     env.events().publish(
         (Symbol::new(env, "deposited"), subscription_id),
         (subscriber, amount, sub.prepaid_balance),

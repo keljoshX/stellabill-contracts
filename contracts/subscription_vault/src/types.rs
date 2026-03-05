@@ -81,29 +81,11 @@ pub enum Error {
     InvalidStatusTransition = 400,
     /// The top-up amount is below the minimum required threshold configured by the admin.
     BelowMinimumTopup = 402,
-    /// The provided amount is zero or negative.
-    InvalidAmount = 1006,
-    /// Charge already processed for this billing period.
-    Replay = 1007,
-    /// Invalid amount.
-    InvalidRecoveryAmount = 1008,
-    /// Charge interval has not elapsed yet.
-    IntervalNotElapsed = 1001,
-    /// Subscription is not in the Active state.
-    NotActive = 1002,
-    /// Emergency stop is active - critical operations are blocked.
-    EmergencyStopActive = 1009,
-    /// Already initialized.
-    AlreadyInitialized = 1009,
-    /// Recovery operation not allowed for this reason or context.
-    RecoveryNotAllowed = 1011,
-    /// Invalid input provided to a function.
-    InvalidInput = 1015,
 
-    // --- Business Logic Errors (1001-1005, 1010, 1012-1014) ---
-    /// Interval has not elapsed since the last payment.
+    // --- Business Logic Errors (1001-1005, 1010, 1012-1016) ---
+    /// Charge interval has not elapsed since the last payment.
     IntervalNotElapsed = 1001,
-    /// Subscription is not in an active state.
+    /// Subscription is not in an active state for this operation.
     NotActive = 1002,
     /// Insufficient balance in the subscription vault.
     InsufficientBalance = 1003,
@@ -111,14 +93,28 @@ pub enum Error {
     UsageNotEnabled = 1004,
     /// Insufficient prepaid balance for the requested usage charge.
     InsufficientPrepaidBalance = 1005,
+    /// The provided amount is zero or negative.
+    InvalidAmount = 1006,
+    /// Charge already processed for this billing period (replay protection).
+    Replay = 1007,
+    /// Invalid recovery amount provided.
+    InvalidRecoveryAmount = 1008,
+    /// Emergency stop is active - critical operations are blocked.
+    EmergencyStopActive = 1009,
+    /// Operation would result in a negative balance or underflow.
+    Underflow = 1010,
+    /// Recovery operation not allowed for this reason or context.
+    RecoveryNotAllowed = 1011,
     /// Combined balance would overflow i128.
     Overflow = 1012,
-    /// Operation would result in an negative balance or underflow.
-    Underflow = 1010,
     /// The contract or requested configuration is not initialized.
     NotInitialized = 1013,
     /// The requested export limit exceeds the maximum allowed.
     InvalidExportLimit = 1014,
+    /// Invalid input provided to a function.
+    InvalidInput = 1015,
+    /// Reentrancy detected - function called recursively during execution.
+    Reentrancy = 1016,
 }
 
 impl Error {
@@ -141,11 +137,11 @@ impl Error {
             Error::Replay => 1007,
             Error::InvalidRecoveryAmount => 1008,
             Error::EmergencyStopActive => 1009,
-            Error::AlreadyInitialized => 1009,
             Error::RecoveryNotAllowed => 1011,
             Error::InvalidInput => 1015,
             Error::NotInitialized => 1013,
             Error::InvalidExportLimit => 1014,
+            Error::Reentrancy => 1016,
         }
     }
 }

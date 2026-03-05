@@ -8,6 +8,7 @@ mod admin;
 mod charge_core;
 mod merchant;
 mod queries;
+mod reentrancy;
 mod state_machine;
 mod subscription;
 mod types;
@@ -146,10 +147,6 @@ pub struct Subscription {
 /// This equals `u32::MAX` (4 294 967 295), providing a practical lifetime
 /// limit that no real deployment will ever approach.
 pub const MAX_SUBSCRIPTION_ID: u32 = u32::MAX;
-
-
-}
-
 
 /// Validates if a status transition is allowed by the state machine.
 ///
@@ -459,6 +456,13 @@ impl SubscriptionVault {
             (Symbol::new(&env, "emergency_stop_enabled"),),
             EmergencyStopEnabledEvent {
                 admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
     /// **ADMIN ONLY**: Export contract-level configuration for migration tooling.
     ///
     /// Read-only snapshot intended for carefully managed upgrades.
@@ -542,6 +546,33 @@ impl SubscriptionVault {
             (Symbol::new(&env, "emergency_stop_disabled"),),
             EmergencyStopDisabledEvent {
                 admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// **ADMIN ONLY**: Export a single subscription summary for migration tooling.
+    pub fn export_subscription_summary(
+        env: Env,
+        admin: Address,
+        subscription_id: u32,
+    ) -> Result<SubscriptionSummary, Error> {
+        require_admin_auth(&env, &admin)?;
+        let sub = queries::get_subscription(&env, subscription_id)?;
+
+        env.events().publish(
+            (Symbol::new(&env, "migration_export"),),
+            MigrationExportEvent {
+                admin: admin.clone(),
+                start_id: subscription_id,
+                limit: 1,
+                exported: 1,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
         Ok(SubscriptionSummary {
             subscription_id,
             subscriber: sub.subscriber,
@@ -638,10 +669,7 @@ impl SubscriptionVault {
     /// Returns [`Error::SubscriptionLimitReached`] if the contract has already allocated
     /// [`MAX_SUBSCRIPTION_ID`] subscriptions and can issue no more unique IDs.
 
-
-
     /// Create a new subscription. Caller deposits initial USDC; contract stores agreement.
-
     pub fn create_subscription(
         env: Env,
         subscriber: Address,
@@ -650,28 +678,9 @@ impl SubscriptionVault {
         interval_seconds: u64,
         usage_enabled: bool,
         expiration: Option<u64>,
-        _expiration: Option<u64>,
     ) -> Result<u32, Error> {
         // Emergency stop check - block new subscriptions when active
         require_not_emergency_stop(&env)?;
-
-
-        subscriber.require_auth();
-        // Allocate a unique ID before touching any other state to fail fast.
-        let id = Self::_next_id(&env)?;
-        // TODO: transfer initial deposit from subscriber to contract, then store subscription
-        let sub = Subscription {
-            subscriber: subscriber.clone(),
-
-        subscription::do_create_subscription(
-            &env,
-            subscriber,
-
-
-        subscriber.require_auth();
-        // TODO: transfer initial deposit from subscriber to contract, then store subscription
-        let sub = Subscription {
-            subscriber: subscriber.clone(),
 
         subscription::do_create_subscription(
             &env,
@@ -680,12 +689,8 @@ impl SubscriptionVault {
             amount,
             interval_seconds,
             usage_enabled,
-
-
             expiration,
-        };
-        env.storage().instance().set(&id, &sub);
-        Ok(id)
+        )
     }
 
     /// Subscriber deposits more USDC into their vault for this subscription.
@@ -695,16 +700,17 @@ impl SubscriptionVault {
     /// micro-transactions that waste gas and complicate accounting. The minimum is set
     /// globally at contract initialization and adjustable by admin via `set_min_topup`.
 
-        )
-    }
+    /// Rejects deposits below the configured minimum threshold.
+    pub fn deposit_funds(
+        env: Env,
+        subscription_id: u32,
+        subscriber: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        // Emergency stop check - block deposits when active
+        require_not_emergency_stop(&env)?;
 
-
-
-        };
-        let id = Self::_next_id(&env);
-        env.storage().instance().set(&id, &sub);
-        Ok(id)
-        )
+        subscription::do_deposit_funds(&env, subscription_id, subscriber, amount)
     }
 
     /// Creates a plan template that can be used to instantiate subscriptions.
@@ -820,122 +826,6 @@ impl SubscriptionVault {
         Ok(())
     }
 
-    /// Billing engine (backend) calls this to charge one interval. Deducts from vault, pays merchant.
-    ///
-
-    /// # Expiration enforcement
-    /// If the subscription has an `expiration` timestamp and the current ledger timestamp is
-    /// greater than or equal to that value, this function returns `Error::SubscriptionExpired`
-    /// and no funds are moved. When `expiration` is `None` there is no time limit.
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        // Load the subscription from storage.
-        let sub: Subscription = env
-            .storage()
-            .instance()
-            .get(&subscription_id)
-            .ok_or(Error::NotFound)?;
-
-        // Expiration guard: reject charges at or after the expiration timestamp.
-        if let Some(exp_ts) = sub.expiration {
-            if env.ledger().timestamp() >= exp_ts {
-                return Err(Error::SubscriptionExpired);
-            }
-        }
-
-        // TODO: require_caller admin or authorized billing service
-        // TODO: check interval and balance, transfer to merchant, update last_payment_timestamp and prepaid_balance
-
-    /// # State Transitions
-    /// - On success: `Active` -> `Active` (no change)
-    /// - On insufficient balance: `Active` -> `InsufficientBalance`
-    ///
-    /// Subscriptions that are `Paused` or `Cancelled` cannot be charged.
-
-        subscription::do_deposit_funds(&env, subscription_id, subscriber, amount)
-    }
-
-
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        subscription::do_charge_subscription(&env, subscription_id)
-
-    /// Charge one subscription for the current billing interval. Optional `idempotency_key` enables
-    /// safe retries: repeated calls with the same key return success without double-charging.
-    pub fn charge_subscription(
-        env: Env,
-        subscription_id: u32,
-        idempotency_key: Option<soroban_sdk::BytesN<32>>,
-    ) -> Result<(), Error> {
-        subscription::do_charge_subscription(&env, subscription_id, idempotency_key)
-
-    }
-
-        subscriber.require_auth();
-
-        let min_topup: i128 = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "min_topup"))
-            .ok_or(Error::NotFound)?;
-        if amount < min_topup {
-            return Err(Error::BelowMinimumTopup);
-        }
-
-
-        // TODO: transfer USDC from subscriber, increase prepaid_balance for subscription_id
-        let _ = (env, subscription_id, amount);
-        Ok(())
-    }
-
-
-
-    /// Billing engine (backend) calls this to charge one interval. Deducts from vault, pays merchant.
-    ///
-    /// # State Transitions
-    /// - On success: `Active` -> `Active` (no change)
-    /// - On insufficient balance: `Active` -> `InsufficientBalance`
-    ///
-    /// Subscriptions that are `Paused` or `Cancelled` cannot be charged.
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        // TODO: require_caller admin or authorized billing service
-        // TODO: load subscription, check interval and balance, transfer to merchant
-
-        // Placeholder for actual charge logic
-        let maybe_sub: Option<Subscription> = env.storage().instance().get(&subscription_id);
-        if let Some(mut sub) = maybe_sub {
-            // Check current status allows charging
-            if sub.status == SubscriptionStatus::Cancelled
-                || sub.status == SubscriptionStatus::Paused
-            {
-                // Cannot charge cancelled or paused subscriptions
-                return Err(Error::InvalidStatusTransition);
-            }
-
-
-            // Simulate charge logic - on insufficient balance, transition to InsufficientBalance
-            let insufficient_balance = false; // TODO: actual balance check
-            if insufficient_balance {
-                validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
-                sub.status = SubscriptionStatus::InsufficientBalance;
-                env.storage().instance().set(&subscription_id, &sub);
-            }
-            // TODO: update last_payment_timestamp and prepaid_balance on successful charge
-        }
-
-
-        Ok(())
-
-    pub fn batch_charge(
-        env: Env,
-        subscription_ids: Vec<u32>,
-    ) -> Result<Vec<BatchChargeResult>, Error> {
-        admin::do_batch_charge(&env, &subscription_ids)
-
-
-        Ok(())
-
-        subscription::do_deposit_funds(&env, subscription_id, subscriber, amount)
-    }
-
     /// Cancel the subscription. Allowed from Active, Paused, or InsufficientBalance.
     /// Transitions to the terminal `Cancelled` state.
     pub fn cancel_subscription(
@@ -983,35 +873,6 @@ impl SubscriptionVault {
     /// - The billing interval must have elapsed since the last charge
     /// - The prepaid balance must be sufficient to cover the charge amount
     ///
-    /// # Preconditions
-    ///
-    /// - The subscription must exist and be in `Active` status
-    /// - `last_payment_timestamp + interval_seconds` must be <= current ledger timestamp
-    /// - `prepaid_balance >= amount` (the subscription's recurring charge amount)
-    ///
-    /// # Behavior
-    ///
-    /// On success:
-    /// - `prepaid_balance` is reduced by `amount`
-    /// - `last_payment_timestamp` is updated to current timestamp
-    /// - A `SubscriptionChargedEvent` is emitted
-    /// - The subscription remains `Active`
-    ///
-    /// On failure (insufficient balance):
-    /// - No changes are made to the subscription's prepaid balance
-    /// - Status transitions to `InsufficientBalance`
-    /// - An `Error::InsufficientBalance` error is returned
-    ///
-    /// # Error Cases
-    ///
-    /// | Error | Condition |
-    /// |-------|-----------|
-    /// | `NotFound` | Subscription ID does not exist |
-    /// | `NotActive` | Subscription is not in `Active` status (Paused, Cancelled, or InsufficientBalance) |
-    /// | `IntervalNotElapsed` | Not enough time has passed since last charge |
-    /// | `Replay` | This billing period has already been charged |
-    /// | `InsufficientBalance` | `prepaid_balance < amount` |
-    ///
     /// **This function is disabled when the emergency stop is active.**
     ///
     /// Enforces strict interval timing and replay protection.
@@ -1019,27 +880,6 @@ impl SubscriptionVault {
         // Emergency stop check - block charges when active
         require_not_emergency_stop(&env)?;
 
-        charge_core::charge_one(&env, subscription_id, None)
-    /// # Non-Destructive Failure Guarantee
-    ///
-    /// When a charge fails due to insufficient balance:
-    /// - The subscriber's prepaid balance is NOT deducted
-    /// - No tokens are transferred to the merchant
-    /// - The subscription metadata remains unchanged (except status)
-    /// - The failure is atomic - no partial state updates occur
-    ///
-    /// # Recovery
-    ///
-    /// If the charge fails due to insufficient balance:
-    /// 1. Subscriber calls `deposit_funds` to add more funds
-    /// 2. Subscriber calls `resume_subscription` to transition back to `Active`
-    /// 3. The next charge attempt will succeed (if balance is sufficient)
-    ///
-    /// # Gas Efficiency
-    ///
-    /// The function uses early validation to avoid unnecessary state modifications.
-    /// Balance check is performed before any state changes.
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
         charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
     }
 
@@ -1057,23 +897,6 @@ impl SubscriptionVault {
     /// * `usage_enabled` must be `true` on the subscription.
     /// * `usage_amount` must be positive (`> 0`).
     /// * `prepaid_balance` must be >= `usage_amount`.
-    ///
-    /// # Behaviour
-    ///
-    /// On success, `prepaid_balance` is reduced by `usage_amount`.  If the
-    /// debit drains the balance to zero the subscription transitions to
-    /// `InsufficientBalance` status, signalling that no further charges
-    /// (interval or usage) can proceed until the subscriber tops up.
-    ///
-    /// # Errors
-    ///
-    /// | Variant | Reason |
-    /// |---------|--------|
-    /// | `NotFound` | Subscription ID does not exist in storage. |
-    /// | `NotActive` | Subscription is not in the `Active` state. |
-    /// | `UsageNotEnabled` | `usage_enabled` is flag is set to `false`. |
-    /// | `InvalidAmount` | `usage_amount` is zero or negative. |
-    /// | `InsufficientPrepaidBalance` | Prepaid balance in the vault cannot cover the debit. |
     pub fn charge_usage(env: Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
         // Emergency stop check - block usage charges when active
         require_not_emergency_stop(&env)?;
@@ -1095,30 +918,6 @@ impl SubscriptionVault {
     // ── Queries ──────────────────────────────────────────────────────────
 
     /// Read subscription by id.
-    pub fn batch_withdraw_merchant_funds(
-        env: Env,
-        merchant: Address,
-        amounts: Vec<i128>,
-    ) -> Result<Vec<BatchWithdrawResult>, Error> {
-        merchant.require_auth();
-        let mut results: Vec<BatchWithdrawResult> = Vec::new(&env);
-        for i in 0..amounts.len() {
-            let amount = amounts.get(i).unwrap();
-            if amount <= 0 {
-                results.push_back(BatchWithdrawResult {
-                    success: false,
-                    error_code: 1003,
-                });
-            } else {
-                results.push_back(BatchWithdrawResult {
-                    success: true,
-                    error_code: 0,
-                });
-            }
-        }
-        Ok(results)
-    }
-
     pub fn get_subscription(env: Env, subscription_id: u32) -> Result<Subscription, Error> {
         queries::get_subscription(&env, subscription_id)
     }
@@ -1146,15 +945,6 @@ impl SubscriptionVault {
         limit: u32,
     ) -> Vec<Subscription> {
         queries::get_subscriptions_by_merchant(&env, merchant, start, limit)
-    }
-
- 
-    pub fn get_subscription(env: Env, subscription_id: u32) -> Result<Subscription, Error> {
-
-        env.storage()
-            .instance()
-            .get(&subscription_id)
-            .ok_or(Error::NotFound)
     }
 
     /// Return the total number of subscriptions ever created (i.e. the next ID that
@@ -1191,15 +981,7 @@ impl SubscriptionVault {
         // Safe: current < MAX_SUBSCRIPTION_ID == u32::MAX, so current + 1 cannot overflow.
         env.storage().instance().set(&key, &(current + 1));
         Ok(current)
-
-        queries::get_subscription(&env, subscription_id)
-
-
-    fn _next_id(env: &Env) -> u32 {
-        let key = Symbol::new(env, "next_id");
-        let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
-        env.storage().instance().set(&key, &(id + 1));
-        id
+    }
 
     /// Return the total number of subscriptions for a merchant.
     pub fn get_merchant_subscription_count(env: Env, merchant: Address) -> u32 {

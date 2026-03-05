@@ -11,10 +11,19 @@
 //! - **Period-based key**: We record the last charged billing period index per subscription.
 //!   A charge for the same period is rejected with [`Error::Replay`].
 //! - **Optional idempotency key**: If the caller supplies an idempotency key (e.g. for retries),
-
-#![allow(dead_code)]
 //!   we store one key per subscription. A second call with the same key returns `Ok(())` without
 //!   debiting again (idempotent success). Storage stays bounded (one key and one period per sub).
+//!
+//! # Reentrancy Protection
+//!
+//! This module does **NOT** make external calls to the token contract. All balance updates
+//! are internal:
+//! - Subscriber prepaid balance is debited locally
+//! - Merchant balance is credited locally via [`crate::merchant::credit_merchant_balance`]
+//!
+//! Because there are no external calls, there is **no reentrancy risk** in this module.
+//! See `docs/reentrancy.md` for the full reentrancy threat model and mitigation strategy.
+
 
 use crate::queries::get_subscription;
 use crate::safe_math::safe_sub_balance;
