@@ -47,7 +47,8 @@ pub fn do_add_to_blocklist(
     // If not admin, verify merchant has subscriptions with this subscriber
     if !is_admin {
         // Merchant authorization: must have at least one subscription with this subscriber
-        let has_subscription = has_merchant_subscription_with_subscriber(env, &authorizer, &subscriber);
+        let has_subscription =
+            has_merchant_subscription_with_subscriber(env, &authorizer, &subscriber);
         if !has_subscription {
             return Err(Error::Forbidden);
         }

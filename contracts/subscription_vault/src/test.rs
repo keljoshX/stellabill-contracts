@@ -35,7 +35,15 @@ fn setup() -> (Env, Address, Address, Address, Address, Address, Address) {
 
     client.init(&token, &6, &admin, &1, &0);
     client.set_treasury(&admin, &treasury);
-    (env, contract_id, admin, subscriber, merchant, treasury, token)
+    (
+        env,
+        contract_id,
+        admin,
+        subscriber,
+        merchant,
+        treasury,
+        token,
+    )
 }
 
 fn create_usage_sub(

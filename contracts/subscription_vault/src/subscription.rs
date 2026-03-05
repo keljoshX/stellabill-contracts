@@ -57,12 +57,12 @@ pub fn do_create_subscription(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
-    
+
     // Blocklist check: prevent blocklisted subscribers from creating subscriptions
     if crate::blocklist::is_blocklisted(env, &subscriber) {
         return Err(Error::SubscriberBlocklisted);
     }
-    
+
     validate_non_negative(amount)?;
     if interval_seconds == 0 {
         return Err(Error::InvalidInput);
