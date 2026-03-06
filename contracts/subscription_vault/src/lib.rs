@@ -68,12 +68,7 @@ fn get_merchant_paused(env: &Env, merchant: &Address) -> bool {
 }
 
 fn require_not_emergency_stop(env: &Env) -> Result<(), Error> {
-    let stopped = env
-        .storage()
-        .instance()
-        .get(&soroban_sdk::Symbol::new(env, "emergency_stop"))
-        .unwrap_or(false);
-    if stopped {
+    if get_emergency_stop(env) {
         return Err(Error::EmergencyStopActive);
     }
     Ok(())

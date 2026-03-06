@@ -53,7 +53,7 @@ pub enum Error {
     InvalidRecoveryAmount = 405,
     SubscriptionExpired = 410,
     SubscriptionLimitReached = 429,
-    
+
     // --- Operational Errors (1001+) ---
     IntervalNotElapsed = 1001,
     NotActive = 1002,
@@ -172,6 +172,20 @@ pub struct Subscription {
     /// When `lifetime_cap` is `Some(cap)` and `lifetime_charged >= cap`, no
     /// further charges are processed and the subscription transitions to `Cancelled`.
     pub lifetime_charged: i128,
+    /// Optional expiration timestamp. Subscription cannot be charged after this time.
+    pub expiration: Option<u64>,
+    /// Billing anchor timestamp - the reference point for calculating billing periods.
+    pub billing_anchor_timestamp: u64,
+    /// Current billing period index.
+    pub current_period_index: u32,
+    /// Usage units consumed in the current period.
+    pub current_period_usage_units: i128,
+    /// Optional usage cap per billing period.
+    pub usage_cap_units: Option<i128>,
+    /// Optional rate limit: max calls per window.
+    pub usage_rate_limit_max_calls: Option<u32>,
+    /// Rate limit window in seconds.
+    pub usage_rate_window_secs: u64,
 }
 
 /// A read-only snapshot of the contract's configuration and current state.

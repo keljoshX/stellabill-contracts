@@ -109,12 +109,16 @@ fn close_elapsed_periods_on_success(
         flags |= BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD;
     }
 
-    let start = sub.billing_anchor_timestamp.saturating_add(
-        (sub.current_period_index as u64).saturating_mul(sub.interval_seconds),
-    );
+    let start = sub
+        .billing_anchor_timestamp
+        .saturating_add((sub.current_period_index as u64).saturating_mul(sub.interval_seconds));
     let end = start.saturating_add(sub.interval_seconds);
     storage.set(
-        &(Symbol::new(env, "bps"), subscription_id, sub.current_period_index),
+        &(
+            Symbol::new(env, "bps"),
+            subscription_id,
+            sub.current_period_index,
+        ),
         &BillingPeriodSnapshot {
             subscription_id,
             period_index: sub.current_period_index,
@@ -202,8 +206,7 @@ fn enforce_usage_rate_limit(
     let mut calls = storage
         .get::<_, u32>(&rate_window_calls_key(subscription_id))
         .unwrap_or(0);
-    let (new_start, new_calls) = if now.saturating_sub(start) >= sub.usage_rate_window_secs
-    {
+    let (new_start, new_calls) = if now.saturating_sub(start) >= sub.usage_rate_window_secs {
         (now, 1)
     } else {
         if calls >= max_calls {
@@ -385,7 +388,6 @@ pub fn charge_one(
                     subscription_id,
                     merchant: sub.merchant.clone(),
                     amount: net_amount,
-                    amount: sub.amount,
                     lifetime_charged: sub.lifetime_charged,
                 },
             );
@@ -504,6 +506,11 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
                     period_index: sub.current_period_index,
                     cap_units: cap,
                     attempted_units: next_usage,
+                    subscriber: sub.subscriber.clone(),
+                    merchant: sub.merchant.clone(),
+                    amount: sub.amount,
+                    interval_seconds: sub.interval_seconds,
+                    lifetime_cap: sub.lifetime_cap,
                 },
             );
             return Err(Error::UsageCapExceeded);

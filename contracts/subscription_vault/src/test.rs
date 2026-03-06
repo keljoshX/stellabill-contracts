@@ -98,6 +98,37 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
     });
 }
 
+/// Create a minimal Subscription for testing with default values for new fields.
+fn test_subscription(
+    subscriber: Address,
+    merchant: Address,
+    amount: i128,
+    interval_seconds: u64,
+    last_payment_timestamp: u64,
+    status: SubscriptionStatus,
+    prepaid_balance: i128,
+) -> Subscription {
+    Subscription {
+        subscriber,
+        merchant,
+        amount,
+        interval_seconds,
+        last_payment_timestamp,
+        status,
+        prepaid_balance,
+        usage_enabled: false,
+        lifetime_cap: None,
+        lifetime_charged: 0,
+        expiration: None,
+        billing_anchor_timestamp: 0,
+        current_period_index: 0,
+        current_period_usage_units: 0,
+        usage_cap_units: None,
+        usage_rate_limit_max_calls: None,
+        usage_rate_window_secs: 0,
+    }
+}
+
 // ── State Machine Helper Tests ─────────────────────────────────────────────────
 
 #[test]
@@ -483,18 +514,15 @@ fn test_invalid_insufficient_balance_to_paused() {
 #[test]
 fn test_subscription_struct_status_field() {
     let env = Env::default();
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: 100_000_000,
-        interval_seconds: 30 * 24 * 60 * 60,
-        last_payment_timestamp: 0,
-        status: SubscriptionStatus::Active,
-        prepaid_balance: 500_000_000,
-        usage_enabled: false,
-        lifetime_cap: None,
-        lifetime_charged: 0,
-    };
+    let sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        100_000_000,
+        30 * 24 * 60 * 60,
+        0,
+        SubscriptionStatus::Active,
+        500_000_000,
+    );
     assert_eq!(sub.status, SubscriptionStatus::Active);
     assert_eq!(sub.lifetime_cap, None);
     assert_eq!(sub.lifetime_charged, 0);
@@ -504,18 +532,16 @@ fn test_subscription_struct_status_field() {
 fn test_subscription_struct_with_lifetime_cap() {
     let env = Env::default();
     let cap = 120_000_000i128; // 120 USDC
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: 10_000_000,
-        interval_seconds: 30 * 24 * 60 * 60,
-        last_payment_timestamp: 0,
-        status: SubscriptionStatus::Active,
-        prepaid_balance: 50_000_000,
-        usage_enabled: false,
-        lifetime_cap: Some(cap),
-        lifetime_charged: 0,
-    };
+    let mut sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        10_000_000,
+        30 * 24 * 60 * 60,
+        0,
+        SubscriptionStatus::Active,
+        50_000_000,
+    );
+    sub.lifetime_cap = Some(cap);
     assert_eq!(sub.lifetime_cap, Some(cap));
     assert_eq!(sub.lifetime_charged, 0);
 }
@@ -722,18 +748,15 @@ fn test_usage_charge_rejected_invalid_amount() {
 #[test]
 fn test_compute_next_charge_info_active() {
     let env = Env::default();
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: AMOUNT,
-        interval_seconds: INTERVAL,
-        last_payment_timestamp: 1000,
-        status: SubscriptionStatus::Active,
-        prepaid_balance: 100_000_000,
-        usage_enabled: false,
-        lifetime_cap: None,
-        lifetime_charged: 0,
-    };
+    let sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        AMOUNT,
+        INTERVAL,
+        1000,
+        SubscriptionStatus::Active,
+        100_000_000,
+    );
     let info = compute_next_charge_info(&sub);
     assert!(info.is_charge_expected);
     assert_eq!(info.next_charge_timestamp, 1000 + INTERVAL);
@@ -742,18 +765,15 @@ fn test_compute_next_charge_info_active() {
 #[test]
 fn test_compute_next_charge_info_paused() {
     let env = Env::default();
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: AMOUNT,
-        interval_seconds: INTERVAL,
-        last_payment_timestamp: 2000,
-        status: SubscriptionStatus::Paused,
-        prepaid_balance: 50_000_000,
-        usage_enabled: false,
-        lifetime_cap: None,
-        lifetime_charged: 0,
-    };
+    let sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        AMOUNT,
+        INTERVAL,
+        2000,
+        SubscriptionStatus::Paused,
+        50_000_000,
+    );
     let info = compute_next_charge_info(&sub);
     assert!(!info.is_charge_expected);
     assert_eq!(info.next_charge_timestamp, 2000 + INTERVAL);
@@ -762,18 +782,15 @@ fn test_compute_next_charge_info_paused() {
 #[test]
 fn test_compute_next_charge_info_cancelled() {
     let env = Env::default();
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: AMOUNT,
-        interval_seconds: INTERVAL,
-        last_payment_timestamp: 5000,
-        status: SubscriptionStatus::Cancelled,
-        prepaid_balance: 0,
-        usage_enabled: false,
-        lifetime_cap: None,
-        lifetime_charged: 0,
-    };
+    let sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        AMOUNT,
+        INTERVAL,
+        5000,
+        SubscriptionStatus::Cancelled,
+        0,
+    );
     let info = compute_next_charge_info(&sub);
     assert!(!info.is_charge_expected);
 }
@@ -781,18 +798,15 @@ fn test_compute_next_charge_info_cancelled() {
 #[test]
 fn test_compute_next_charge_info_insufficient_balance() {
     let env = Env::default();
-    let sub = Subscription {
-        subscriber: Address::generate(&env),
-        merchant: Address::generate(&env),
-        amount: AMOUNT,
-        interval_seconds: INTERVAL,
-        last_payment_timestamp: 3000,
-        status: SubscriptionStatus::InsufficientBalance,
-        prepaid_balance: 1_000_000,
-        usage_enabled: false,
-        lifetime_cap: None,
-        lifetime_charged: 0,
-    };
+    let sub = test_subscription(
+        Address::generate(&env),
+        Address::generate(&env),
+        AMOUNT,
+        INTERVAL,
+        3000,
+        SubscriptionStatus::InsufficientBalance,
+        1_000_000,
+    );
     let info = compute_next_charge_info(&sub);
     assert!(info.is_charge_expected);
 }
@@ -811,6 +825,13 @@ fn test_compute_next_charge_info_overflow_protection() {
         usage_enabled: false,
         lifetime_cap: None,
         lifetime_charged: 0,
+        expiration: None,
+        billing_anchor_timestamp: 0,
+        current_period_index: 0,
+        current_period_usage_units: 0,
+        usage_cap_units: None,
+        usage_rate_limit_max_calls: None,
+        usage_rate_window_secs: 0,
     };
     let info = compute_next_charge_info(&sub);
     assert!(info.is_charge_expected);
@@ -1903,7 +1924,8 @@ fn test_merchant_pause_blocks_charges() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Pause merchant
@@ -1925,7 +1947,8 @@ fn test_merchant_pause_blocks_usage_charges() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Pause merchant
@@ -1944,7 +1967,8 @@ fn test_merchant_pause_allows_withdrawals() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Charge once to accumulate merchant balance
@@ -1969,7 +1993,8 @@ fn test_merchant_pause_allows_subscriber_refunds() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Pause merchant
@@ -1991,7 +2016,8 @@ fn test_merchant_pause_with_subscription_pause() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Pause subscription
@@ -2019,7 +2045,8 @@ fn test_merchant_pause_with_emergency_stop() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
     client.deposit_funds(&sub_id, &subscriber, &PREPAID);
 
     // Enable emergency stop
@@ -2052,8 +2079,10 @@ fn test_merchant_pause_does_not_affect_other_merchants() {
 
     soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &(PREPAID * 2));
 
-    let sub_id1 = client.create_subscription(&subscriber, &merchant1, &AMOUNT, &INTERVAL, &false, &None);
-    let sub_id2 = client.create_subscription(&subscriber, &merchant2, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id1 =
+        client.create_subscription(&subscriber, &merchant1, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id2 =
+        client.create_subscription(&subscriber, &merchant2, &AMOUNT, &INTERVAL, &false, &None);
 
     client.deposit_funds(&sub_id1, &subscriber, &PREPAID);
     client.deposit_funds(&sub_id2, &subscriber, &PREPAID);

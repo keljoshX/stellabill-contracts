@@ -79,7 +79,9 @@ pub fn credit_merchant_and_treasury(
         .checked_mul(fee_bps as i128)
         .ok_or(Error::Overflow)?
         / 10_000;
-    let net_amount = gross_amount.checked_sub(fee_amount).ok_or(Error::Underflow)?;
+    let net_amount = gross_amount
+        .checked_sub(fee_amount)
+        .ok_or(Error::Underflow)?;
 
     credit_merchant_balance(env, merchant, net_amount)?;
     if fee_amount > 0 {
