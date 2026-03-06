@@ -54,18 +54,13 @@ pub fn do_create_subscription(
     amount: i128,
     interval_seconds: u64,
     usage_enabled: bool,
-    expiration: Option<u64>,
+    lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
     validate_non_negative(amount)?;
     if interval_seconds == 0 {
         return Err(Error::InvalidInput);
     }
-    let now = env.ledger().timestamp();
-    lifetime_cap: Option<i128>,
-) -> Result<u32, Error> {
-    subscriber.require_auth();
-    validate_non_negative(amount)?;
 
     // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
@@ -73,6 +68,8 @@ pub fn do_create_subscription(
             return Err(Error::InvalidAmount);
         }
     }
+
+    let now = env.ledger().timestamp();
 
     let sub = Subscription {
         subscriber: subscriber.clone(),
@@ -83,7 +80,6 @@ pub fn do_create_subscription(
         status: SubscriptionStatus::Active,
         prepaid_balance: 0i128,
         usage_enabled,
-        expiration,
         billing_anchor_timestamp: now,
         current_period_index: 0,
         current_period_usage_units: 0,

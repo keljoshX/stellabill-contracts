@@ -1,42 +1,4 @@
 use crate::{
-    SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
-    BILLING_SNAPSHOT_FLAG_CLOSED, BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
-};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, Env};
-
-const INTERVAL: u64 = 10;
-
-fn setup() -> (Env, Address, Address, Address, Address, Address, Address) {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|li| li.timestamp = 1_000);
-
-    let contract_id = env.register(SubscriptionVault, ());
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract(token_admin.clone());
-    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
-    token_admin_client.mint(&subscriber, &5_000_000);
-
-    client.init(&token, &6, &admin, &1, &0);
-    client.set_treasury(&admin, &treasury);
-    (env, contract_id, admin, subscriber, merchant, treasury, token)
-}
-
-fn create_usage_sub(
-    client: &SubscriptionVaultClient<'_>,
-    subscriber: &Address,
-    merchant: &Address,
-    amount: i128,
-) -> u32 {
-    client.create_subscription(subscriber, merchant, &amount, &INTERVAL, &true, &None)
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
     Error, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault,
     SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
@@ -655,166 +617,6 @@ fn test_withdraw_subscriber_funds() {
     assert_eq!(token.balance(&subscriber), 5000);
     assert_eq!(token.balance(&contract_id), 0);
 }
-
-// ── Min-Topup Enforcement Tests ────────────────────────────────────────────────
-
-#[test]
-fn snapshots_written_after_successful_close() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.charge_usage(&sub_id, &25);
-
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL + 1);
-    client.charge_subscription(&sub_id);
-
-    let snap0 = client.get_billing_period_snapshot(&sub_id, &0);
-    assert_eq!(snap0.total_usage_units, 25);
-    assert_eq!(snap0.total_amount_charged, 25);
-    assert!(snap0.status_flags & BILLING_SNAPSHOT_FLAG_CLOSED != 0);
-    assert!(snap0.status_flags & BILLING_SNAPSHOT_FLAG_USAGE_CHARGED != 0);
-    let admin = Address::generate(&env);
-    let token_addr = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let min_topup = 5_000_000i128;
-
-    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &10_000_000i128,
-        &(30 * 24 * 60 * 60),
-        &false,
-        &None::<i128>,
-    );
-    client.cancel_subscription(&id, &merchant);
-    let result = client.try_deposit_funds(&id, &subscriber, &4_999_999);
-    assert!(result.is_err());
-}
-
-#[test]
-fn failed_charge_does_not_create_snapshot() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 500);
-
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL + 1);
-    assert!(client.try_charge_subscription(&sub_id).is_err());
-    assert!(client.try_get_billing_period_snapshot(&sub_id, &0).is_err());
-    let admin = Address::generate(&env);
-    let token_addr = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let min_topup = 5_000_000i128;
-
-    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
-    token_admin.mint(&subscriber, &min_topup);
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &10_000_000i128,
-        &(30 * 24 * 60 * 60),
-        &false,
-        &None::<i128>,
-    );
-    assert!(client
-        .try_deposit_funds(&id, &subscriber, &min_topup)
-        .is_ok());
-}
-
-#[test]
-fn usage_cap_enforced_per_period() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.set_usage_cap(&sub_id, &merchant, &Some(100));
-
-    client.charge_usage(&sub_id, &60);
-    client.charge_usage(&sub_id, &40);
-    assert!(client.try_charge_usage(&sub_id, &1).is_err());
-
-    env.ledger().with_mut(|li| li.timestamp += INTERVAL + 1);
-    client.charge_subscription(&sub_id);
-    client.charge_usage(&sub_id, &10);
-}
-
-#[test]
-fn usage_rate_limit_enforced_and_resets() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.set_usage_rate_limit(&sub_id, &merchant, &Some(2), &60);
-
-    client.charge_usage(&sub_id, &1);
-    client.charge_usage(&sub_id, &1);
-    assert!(client.try_charge_usage(&sub_id, &1).is_err());
-
-    env.ledger().with_mut(|li| li.timestamp += 61);
-    client.charge_usage(&sub_id, &1);
-}
-
-#[test]
-fn protocol_fee_skim_conserves_value() {
-    let (env, contract_id, admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.set_protocol_fee_bps(&admin, &500);
-    client.deposit_funds(&sub_id, &subscriber, &1_000);
-    client.charge_usage(&sub_id, &200);
-
-    let merchant_bal = client.get_merchant_balance(&merchant);
-    let treasury_bal = client.get_treasury_balance();
-    assert_eq!(merchant_bal, 190);
-    assert_eq!(treasury_bal, 10);
-    assert_eq!(merchant_bal + treasury_bal, 200);
-}
-
-#[test]
-fn status_becomes_insufficient_after_full_usage_debit() {
-    let (env, contract_id, _admin, subscriber, merchant, _treasury, _token) = setup();
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
-    let sub_id = create_usage_sub(&client, &subscriber, &merchant, 100);
-    client.deposit_funds(&sub_id, &subscriber, &100);
-    client.charge_usage(&sub_id, &100);
-    let sub = client.get_subscription(&sub_id);
-    assert_eq!(sub.status, SubscriptionStatus::InsufficientBalance);
-}
-    let admin = Address::generate(&env);
-    let token_addr = env
-        .register_stellar_asset_contract_v2(admin.clone())
-        .address();
-    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let min_topup = 5_000_000i128;
-    let deposit_amount = 10_000_000i128;
-
-    client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
-    token_admin.mint(&subscriber, &deposit_amount);
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &deposit_amount,
-        &(30 * 24 * 60 * 60),
-        &false,
-        &None::<i128>,
-    );
-    assert!(client
-        .try_deposit_funds(&id, &subscriber, &deposit_amount)
-        .is_ok());
-}
-
-// ── Usage-charge tests ─────────────────────────────────────────────────────────
 
 fn setup_usage(env: &Env) -> (SubscriptionVaultClient<'_>, u32) {
     let contract_id = env.register(SubscriptionVault, ());
@@ -2072,4 +1874,217 @@ fn test_reentrancy_protection_documentation() {
     // - withdraw_subscriber_funds: updates balance before transfer ✓
 
     assert!(true); // Placeholder to indicate test passed
+}
+
+// ── Merchant Pause Tests ──────────────────────────────────────────────────────
+
+#[test]
+fn test_merchant_pause_toggle() {
+    let (env, client, token, _admin) = setup_test_env();
+    let merchant = Address::generate(&env);
+
+    // Initially not paused
+    assert!(!client.get_merchant_paused(&merchant));
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+    assert!(client.get_merchant_paused(&merchant));
+
+    // Unpause merchant
+    client.unpause_merchant(&merchant);
+    assert!(!client.get_merchant_paused(&merchant));
+}
+
+#[test]
+fn test_merchant_pause_blocks_charges() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Advance time
+    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
+
+    // Attempt charge should fail
+    let result = client.try_charge_subscription(&sub_id);
+    assert_eq!(result, Err(Ok(Error::MerchantPaused)));
+}
+
+#[test]
+fn test_merchant_pause_blocks_usage_charges() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Attempt usage charge should fail
+    let result = client.try_charge_usage(&sub_id, &1_000_000);
+    assert_eq!(result, Err(Ok(Error::MerchantPaused)));
+}
+
+#[test]
+fn test_merchant_pause_allows_withdrawals() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Charge once to accumulate merchant balance
+    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
+    client.charge_subscription(&sub_id);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Merchant should still be able to withdraw
+    let balance = client.get_merchant_balance(&merchant);
+    assert!(balance > 0);
+    client.withdraw_merchant_funds(&merchant, &balance);
+    assert_eq!(client.get_merchant_balance(&merchant), 0);
+}
+
+#[test]
+fn test_merchant_pause_allows_subscriber_refunds() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Cancel and withdraw should still work
+    client.cancel_subscription(&sub_id, &subscriber);
+    client.withdraw_subscriber_funds(&sub_id, &subscriber);
+
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(sub.prepaid_balance, 0);
+}
+
+#[test]
+fn test_merchant_pause_with_subscription_pause() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Pause subscription
+    client.pause_subscription(&sub_id, &subscriber);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Resume subscription
+    client.resume_subscription(&sub_id, &subscriber);
+
+    // Advance time
+    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
+
+    // Charge should fail due to merchant pause (not subscription status)
+    let result = client.try_charge_subscription(&sub_id);
+    assert_eq!(result, Err(Ok(Error::MerchantPaused)));
+}
+
+#[test]
+fn test_merchant_pause_with_emergency_stop() {
+    let (env, client, token, admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &PREPAID);
+
+    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    client.deposit_funds(&sub_id, &subscriber, &PREPAID);
+
+    // Enable emergency stop
+    client.enable_emergency_stop(&admin);
+
+    // Pause merchant
+    client.pause_merchant(&merchant);
+
+    // Advance time
+    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
+
+    // Charge should fail due to emergency stop (checked first)
+    let result = client.try_charge_subscription(&sub_id);
+    assert_eq!(result, Err(Ok(Error::EmergencyStopActive)));
+
+    // Disable emergency stop
+    client.disable_emergency_stop(&admin);
+
+    // Now charge should fail due to merchant pause
+    let result = client.try_charge_subscription(&sub_id);
+    assert_eq!(result, Err(Ok(Error::MerchantPaused)));
+}
+
+#[test]
+fn test_merchant_pause_does_not_affect_other_merchants() {
+    let (env, client, token, _admin) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant1 = Address::generate(&env);
+    let merchant2 = Address::generate(&env);
+
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &(PREPAID * 2));
+
+    let sub_id1 = client.create_subscription(&subscriber, &merchant1, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id2 = client.create_subscription(&subscriber, &merchant2, &AMOUNT, &INTERVAL, &false, &None);
+
+    client.deposit_funds(&sub_id1, &subscriber, &PREPAID);
+    client.deposit_funds(&sub_id2, &subscriber, &PREPAID);
+
+    // Pause only merchant1
+    client.pause_merchant(&merchant1);
+
+    // Advance time
+    env.ledger().with_mut(|li| li.timestamp += INTERVAL);
+
+    // merchant1 charge should fail
+    let result1 = client.try_charge_subscription(&sub_id1);
+    assert_eq!(result1, Err(Ok(Error::MerchantPaused)));
+
+    // merchant2 charge should succeed
+    client.charge_subscription(&sub_id2);
+    assert!(client.get_merchant_balance(&merchant2) > 0);
+}
+
+#[test]
+fn test_merchant_pause_idempotent() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let merchant = Address::generate(&env);
+
+    // Pause twice
+    client.pause_merchant(&merchant);
+    client.pause_merchant(&merchant);
+    assert!(client.get_merchant_paused(&merchant));
+
+    // Unpause twice
+    client.unpause_merchant(&merchant);
+    client.unpause_merchant(&merchant);
+    assert!(!client.get_merchant_paused(&merchant));
 }

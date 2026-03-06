@@ -15,37 +15,8 @@ pub const BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD: u32 = 1 << 3;
 #[derive(Clone)]
 pub enum DataKey {
     MerchantSubs(Address),
-}
-
-/// Detailed error information for insufficient balance scenarios.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SubscriptionStatus {
-    Active = 0,
-    Paused = 1,
-    Cancelled = 2,
-    InsufficientBalance = 3,
-    GracePeriod = 4,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Subscription {
-    pub subscriber: Address,
-    pub merchant: Address,
-    pub amount: i128,
-    pub interval_seconds: u64,
-    pub last_payment_timestamp: u64,
-    pub status: SubscriptionStatus,
-    pub prepaid_balance: i128,
-    pub usage_enabled: bool,
-    pub expiration: Option<u64>,
-    pub billing_anchor_timestamp: u64,
-    pub current_period_index: u32,
-    pub current_period_usage_units: i128,
-    pub usage_cap_units: Option<i128>,
-    pub usage_rate_limit_max_calls: Option<u32>,
-    pub usage_rate_window_secs: u64,
+    MerchantPaused(Address),
+    EmergencyStop,
 }
 
 #[contracttype]
@@ -58,27 +29,12 @@ pub struct BillingPeriodSnapshot {
     pub total_amount_charged: i128,
     pub total_usage_units: i128,
     pub status_flags: u32,
-impl InsufficientBalanceError {
-    pub const fn new(available: i128, required: i128) -> Self {
-        Self {
-            available,
-            required,
-        }
-    }
-
-    pub fn shortfall(&self) -> i128 {
-        self.required - self.available
-    }
 }
 
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
-    Unauthorized = 401,
-    Forbidden = 403,
-    NotFound = 404,
-    InvalidStatusTransition = 400,
     // --- Auth Errors (401-403) ---
     /// Caller does not have the required authorization.
     Unauthorized = 401,
@@ -89,7 +45,7 @@ pub enum Error {
     /// The requested resource was not found in storage.
     NotFound = 404,
 
-    // --- Invalid Input (400, 402, 405-409) ---
+    // --- Invalid Input (400, 402, 405-410) ---
     /// The requested state transition is not allowed by the state machine.
     InvalidStatusTransition = 400,
     /// The top-up amount is below the minimum required threshold.
@@ -97,6 +53,8 @@ pub enum Error {
     InvalidRecoveryAmount = 405,
     SubscriptionExpired = 410,
     SubscriptionLimitReached = 429,
+    
+    // --- Operational Errors (1001+) ---
     IntervalNotElapsed = 1001,
     NotActive = 1002,
     InsufficientBalance = 1003,
@@ -104,6 +62,7 @@ pub enum Error {
     InsufficientPrepaidBalance = 1005,
     InvalidAmount = 1006,
     Replay = 1007,
+    MerchantPaused = 1008,
     EmergencyStopActive = 1009,
     Underflow = 1010,
     RecoveryNotAllowed = 1011,
@@ -112,17 +71,14 @@ pub enum Error {
     InvalidExportLimit = 1014,
     InvalidInput = 1015,
     Reentrancy = 1016,
-    AlreadyInitialized = 1017,
-    UsageCapExceeded = 1018,
-    RateLimitExceeded = 1019,
-    InvalidFeeBps = 1020,
-    TreasuryNotConfigured = 1021,
     /// Lifetime charge cap has been reached; no further charges are allowed.
     LifetimeCapReached = 1017,
     /// Contract is already initialized; init may only be called once.
     AlreadyInitialized = 1018,
-    /// The contract has allocated the maximum number of subscriptions.
-    SubscriptionLimitReached = 429,
+    UsageCapExceeded = 1019,
+    RateLimitExceeded = 1020,
+    InvalidFeeBps = 1021,
+    TreasuryNotConfigured = 1022,
 }
 
 impl Error {
@@ -131,43 +87,11 @@ impl Error {
     }
 }
 
-        match self {
-            Error::NotFound => 404,
-            Error::Unauthorized => 401,
-            Error::Forbidden => 403,
-            Error::IntervalNotElapsed => 1001,
-            Error::NotActive => 1002,
-            Error::InvalidStatusTransition => 400,
-            Error::BelowMinimumTopup => 402,
-            Error::Overflow => 1012,
-            Error::Underflow => 1010,
-            Error::InsufficientBalance => 1003,
-            Error::InvalidAmount => 1006,
-            Error::UsageNotEnabled => 1004,
-            Error::InsufficientPrepaidBalance => 1005,
-            Error::Replay => 1007,
-            Error::InvalidRecoveryAmount => 1008,
-            Error::EmergencyStopActive => 1009,
-            Error::RecoveryNotAllowed => 1011,
-            Error::InvalidInput => 1015,
-            Error::NotInitialized => 1013,
-            Error::InvalidExportLimit => 1014,
-            Error::Reentrancy => 1016,
-            Error::LifetimeCapReached => 1017,
-            Error::AlreadyInitialized => 1018,
-            Error::SubscriptionLimitReached => 429,
-        }
-    }
-}
-
 /// Result of charging one subscription in a batch.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchChargeResult {
     pub success: bool,
-    pub error_code: u32,
-}
-
     /// If success is false, the error code; otherwise 0.
     pub error_code: u32,
 }
@@ -310,21 +234,6 @@ pub struct PlanTemplate {
     pub lifetime_cap: Option<i128>,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NextChargeInfo {
-    pub next_charge_timestamp: u64,
-    pub is_charge_expected: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RecoveryReason {
-    AccidentalTransfer = 0,
-    DeprecatedFlow = 1,
-    UnreachableSubscriber = 2,
-}
-
 /// Result of computing next charge information for a subscription.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -368,6 +277,22 @@ pub struct EmergencyStopDisabledEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when a merchant-wide pause is enabled.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantPausedEvent {
+    pub merchant: Address,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a merchant-wide pause is disabled.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantUnpausedEvent {
+    pub merchant: Address,
+    pub timestamp: u64,
+}
+
 /// Represents the reason for stranded funds that can be recovered by admin.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -406,7 +331,7 @@ pub struct UsageCapReachedEvent {
     pub lifetime_cap: Option<i128>,
 }
 
-/// Event emitted when funds are deposited into a subscription vault.
+/// Event emitted when protocol fee is skimmed.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProtocolFeeSkimmedEvent {
@@ -416,6 +341,22 @@ pub struct ProtocolFeeSkimmedEvent {
     pub gross_amount: i128,
     pub fee_amount: i128,
     pub net_amount: i128,
+}
+
+/// Event emitted when a subscription is created.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionCreatedEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub interval_seconds: u64,
+}
+
+/// Event emitted when funds are deposited into a subscription vault.
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct FundsDepositedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
@@ -444,7 +385,6 @@ pub struct SubscriptionCancelledEvent {
 /// Event emitted when a subscription is paused.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct SubscriptionChargedEvent {
 pub struct SubscriptionPausedEvent {
     pub subscription_id: u32,
     pub authorizer: Address,

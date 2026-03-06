@@ -14,29 +14,23 @@ mod merchant;
 mod queries;
 mod reentrancy;
 mod safe_math;
-pub mod safe_math;
 mod state_machine;
 mod subscription;
 mod types;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
-
-pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
-pub use types::*;
-
-pub const MAX_SUBSCRIPTION_ID: u32 = u32::MAX;
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    BatchChargeResult, BatchWithdrawResult, CapInfo, ContractSnapshot, DataKey,
-    EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MigrationExportEvent, NextChargeInfo,
-    OneOffChargedEvent, PlanTemplate, RecoveryEvent, RecoveryReason, Subscription,
-    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
-    SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
+    BatchChargeResult, BatchWithdrawResult, BillingPeriodSnapshot, CapInfo, ContractSnapshot,
+    DataKey, EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
+    LifetimeCapReachedEvent, MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent,
+    MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, PlanTemplate, RecoveryEvent,
+    RecoveryReason, Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent,
+    SubscriptionCreatedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
+    SubscriptionStatus, SubscriptionSummary,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -63,6 +57,13 @@ fn get_emergency_stop(env: &Env) -> bool {
     env.storage()
         .instance()
         .get(&DataKey::EmergencyStop)
+        .unwrap_or(false)
+}
+
+fn get_merchant_paused(env: &Env, merchant: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::MerchantPaused(merchant.clone()))
         .unwrap_or(false)
 }
 
@@ -215,6 +216,51 @@ impl SubscriptionVault {
             },
         );
 
+        Ok(())
+    }
+
+    // ── Merchant Pause ────────────────────────────────────────────────────────
+
+    /// Get the merchant-wide pause status.
+    pub fn get_merchant_paused(env: Env, merchant: Address) -> bool {
+        get_merchant_paused(&env, &merchant)
+    }
+
+    /// Enable merchant-wide pause. Merchant only.
+    pub fn pause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant.require_auth();
+        if get_merchant_paused(&env, &merchant) {
+            return Ok(());
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MerchantPaused(merchant.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "merchant_paused"),),
+            MerchantPausedEvent {
+                merchant,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Disable merchant-wide pause. Merchant only.
+    pub fn unpause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant.require_auth();
+        if !get_merchant_paused(&env, &merchant) {
+            return Ok(());
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MerchantPaused(merchant.clone()), &false);
+        env.events().publish(
+            (Symbol::new(&env, "merchant_unpaused"),),
+            MerchantUnpausedEvent {
+                merchant,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
         Ok(())
     }
 
@@ -374,26 +420,13 @@ impl SubscriptionVault {
         lifetime_cap: Option<i128>,
     ) -> Result<u32, Error> {
         require_not_emergency_stop(&env)?;
-        if let Some(exp) = expiration {
-            if exp <= env.ledger().timestamp() {
-                return Err(Error::InvalidInput);
-            }
-        }
-        let id = subscription::do_create_subscription(
+        subscription::do_create_subscription(
             &env,
             subscriber,
             merchant,
             amount,
             interval_seconds,
             usage_enabled,
-            expiration,
-        )?;
-        if id == MAX_SUBSCRIPTION_ID {
-            return Err(Error::SubscriptionLimitReached);
-        }
-        Ok(id)
-    }
-
             lifetime_cap,
         )
     }
@@ -425,9 +458,6 @@ impl SubscriptionVault {
         usage_enabled: bool,
         lifetime_cap: Option<i128>,
     ) -> Result<u32, Error> {
-        subscription::do_create_plan_template(&env, merchant, amount, interval_seconds, usage_enabled)
-    }
-
         subscription::do_create_plan_template(
             &env,
             merchant,
@@ -452,16 +482,6 @@ impl SubscriptionVault {
         subscription::get_plan_template(&env, plan_template_id)
     }
 
-    pub fn deposit_funds(
-        env: Env,
-        subscription_id: u32,
-        subscriber: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
-        require_not_emergency_stop(&env)?;
-        subscription::do_deposit_funds(&env, subscription_id, subscriber, amount)
-    }
-
     /// Cancel the subscription. Allowed from Active, Paused, or InsufficientBalance.
     /// Transitions to the terminal `Cancelled` state.
     pub fn cancel_subscription(
@@ -472,9 +492,8 @@ impl SubscriptionVault {
         subscription::do_cancel_subscription(&env, subscription_id, authorizer)
     }
 
+    /// Pause a subscription.
     pub fn pause_subscription(
-    /// Subscriber withdraws their remaining prepaid balance after cancellation.
-    pub fn withdraw_subscriber_funds(
         env: Env,
         subscription_id: u32,
         authorizer: Address,
@@ -482,12 +501,22 @@ impl SubscriptionVault {
         subscription::do_pause_subscription(&env, subscription_id, authorizer)
     }
 
+    /// Resume a subscription.
     pub fn resume_subscription(
         env: Env,
         subscription_id: u32,
         authorizer: Address,
     ) -> Result<(), Error> {
         subscription::do_resume_subscription(&env, subscription_id, authorizer)
+    }
+
+    /// Subscriber withdraws their remaining prepaid balance after cancellation.
+    pub fn withdraw_subscriber_funds(
+        env: Env,
+        subscription_id: u32,
+        subscriber: Address,
+    ) -> Result<(), Error> {
+        subscription::do_withdraw_subscriber_funds(&env, subscription_id, subscriber)
     }
 
     pub fn set_usage_cap(
@@ -545,22 +574,6 @@ impl SubscriptionVault {
         charge_core::charge_usage_one(&env, subscription_id, usage_amount)
     }
 
-    pub fn batch_charge(
-        env: Env,
-        subscription_ids: Vec<u32>,
-    ) -> Result<Vec<BatchChargeResult>, Error> {
-        require_not_emergency_stop(&env)?;
-        admin::do_batch_charge(&env, &subscription_ids)
-    }
-
-    pub fn charge_one_off(
-        env: Env,
-        subscription_id: u32,
-        merchant: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
-        subscription::do_charge_one_off(&env, subscription_id, merchant, amount)
-    }
     // ── Merchant ──────────────────────────────────────────────────────────────
 
     pub fn withdraw_merchant_funds(env: Env, merchant: Address, amount: i128) -> Result<(), Error> {
@@ -580,13 +593,6 @@ impl SubscriptionVault {
         merchant::get_treasury_balance(&env)
     }
 
-    pub fn withdraw_subscriber_funds(
-        env: Env,
-        subscription_id: u32,
-        subscriber: Address,
-    ) -> Result<(), Error> {
-        subscription::do_withdraw_subscriber_funds(&env, subscription_id, subscriber)
-    }
     // ── Queries ──────────────────────────────────────────────────────────────
 
     pub fn get_subscription(env: Env, subscription_id: u32) -> Result<Subscription, Error> {

@@ -34,12 +34,11 @@ use crate::queries::get_subscription;
 use crate::safe_math::safe_sub_balance;
 use crate::state_machine::validate_status_transition;
 use crate::types::{
-    BillingPeriodSnapshot, Error, ProtocolFeeSkimmedEvent, SubscriptionChargedEvent,
-    SubscriptionStatus, UsageCapReachedEvent, BILLING_SNAPSHOT_FLAG_CLOSED,
-    BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD, BILLING_SNAPSHOT_FLAG_INTERVAL_CHARGED,
-    BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
+    BillingPeriodSnapshot, Error, LifetimeCapReachedEvent, ProtocolFeeSkimmedEvent,
+    SubscriptionChargedEvent, SubscriptionStatus, UsageCapReachedEvent,
+    BILLING_SNAPSHOT_FLAG_CLOSED, BILLING_SNAPSHOT_FLAG_EMPTY_PERIOD,
+    BILLING_SNAPSHOT_FLAG_INTERVAL_CHARGED, BILLING_SNAPSHOT_FLAG_USAGE_CHARGED,
 };
-use crate::types::{Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus};
 use soroban_sdk::{symbol_short, Env, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
@@ -249,6 +248,12 @@ pub fn charge_one(
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
 ) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+
+    // Check merchant pause before processing
+    if crate::get_merchant_paused(env, &sub.merchant) {
+        return Err(Error::MerchantPaused);
+    }
+
     if let Some(exp_ts) = sub.expiration {
         if now >= exp_ts {
             return Err(Error::SubscriptionExpired);
@@ -466,6 +471,11 @@ pub fn charge_one(
 pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
     let now = env.ledger().timestamp();
+
+    // Check merchant pause before processing
+    if crate::get_merchant_paused(env, &sub.merchant) {
+        return Err(Error::MerchantPaused);
+    }
 
     if sub.status != SubscriptionStatus::Active {
         return Err(Error::NotActive);
