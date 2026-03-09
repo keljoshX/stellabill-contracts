@@ -26,7 +26,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    BatchChargeResult, BatchWithdrawResult, BillingChargeKind, BillingCompactedEvent,
+    AcceptedToken, BatchChargeResult, BatchWithdrawResult, BillingChargeKind, BillingCompactedEvent,
     BillingCompactionSummary, BillingRetentionConfig, BillingStatement, BillingStatementAggregate,
     BillingStatementsPage, CapInfo, ContractSnapshot, DataKey, EmergencyStopDisabledEvent,
     EmergencyStopEnabledEvent, Error, FundsDepositedEvent, LifetimeCapReachedEvent,
@@ -244,6 +244,7 @@ impl SubscriptionVault {
             subscription_id,
             subscriber: sub.subscriber,
             merchant: sub.merchant,
+            token: sub.token,
             amount: sub.amount,
             interval_seconds: sub.interval_seconds,
             last_payment_timestamp: sub.last_payment_timestamp,
@@ -289,6 +290,7 @@ impl SubscriptionVault {
                     subscription_id: id,
                     subscriber: sub.subscriber,
                     merchant: sub.merchant,
+                    token: sub.token,
                     amount: sub.amount,
                     interval_seconds: sub.interval_seconds,
                     last_payment_timestamp: sub.last_payment_timestamp,
@@ -355,6 +357,30 @@ impl SubscriptionVault {
         )
     }
 
+    /// Create a subscription pinned to a specific accepted token.
+    pub fn create_subscription_with_token(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval_seconds: u64,
+        usage_enabled: bool,
+        lifetime_cap: Option<i128>,
+    ) -> Result<u32, Error> {
+        require_not_emergency_stop(&env)?;
+        subscription::do_create_subscription_with_token(
+            &env,
+            subscriber,
+            merchant,
+            token,
+            amount,
+            interval_seconds,
+            usage_enabled,
+            lifetime_cap,
+        )
+    }
+
     /// Subscriber deposits USDC into their prepaid vault.
     ///
     /// **Disabled when emergency stop is active.**
@@ -385,6 +411,27 @@ impl SubscriptionVault {
         subscription::do_create_plan_template(
             &env,
             merchant,
+            amount,
+            interval_seconds,
+            usage_enabled,
+            lifetime_cap,
+        )
+    }
+
+    /// Creates a token-specific plan template.
+    pub fn create_plan_template_with_token(
+        env: Env,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval_seconds: u64,
+        usage_enabled: bool,
+        lifetime_cap: Option<i128>,
+    ) -> Result<u32, Error> {
+        subscription::do_create_plan_template_with_token(
+            &env,
+            merchant,
+            token,
             amount,
             interval_seconds,
             usage_enabled,
@@ -480,9 +527,24 @@ impl SubscriptionVault {
         merchant::withdraw_merchant_funds(&env, merchant, amount)
     }
 
+    /// Merchant withdraw for a specific token bucket.
+    pub fn withdraw_merchant_token_funds(
+        env: Env,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        merchant::withdraw_merchant_funds_for_token(&env, merchant, token, amount)
+    }
+
     /// Get the merchant's accumulated (uncharged) balance.
     pub fn get_merchant_balance(env: Env, merchant: Address) -> i128 {
         merchant::get_merchant_balance(&env, &merchant)
+    }
+
+    /// Token-scoped merchant balance.
+    pub fn get_merchant_balance_by_token(env: Env, merchant: Address, token: Address) -> i128 {
+        merchant::get_merchant_balance_by_token(&env, &merchant, &token)
     }
 
     // ── Queries ──────────────────────────────────────────────────────────────
@@ -585,6 +647,55 @@ impl SubscriptionVault {
             limit,
             newest_first,
         )
+    }
+
+    /// Add a token to the accepted token registry. Admin only.
+    pub fn add_accepted_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        decimals: u32,
+    ) -> Result<(), Error> {
+        admin::add_accepted_token(&env, admin, token, decimals)
+    }
+
+    /// Remove a non-default token from accepted token registry. Admin only.
+    pub fn remove_accepted_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
+        admin::remove_accepted_token(&env, admin, token)
+    }
+
+    /// List accepted token metadata.
+    pub fn list_accepted_tokens(env: Env) -> Vec<AcceptedToken> {
+        admin::list_accepted_tokens(&env)
+    }
+
+    /// Return subscriptions for a token, paginated by offset.
+    pub fn get_subscriptions_by_token(
+        env: Env,
+        token: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Subscription> {
+        let key = (Symbol::new(&env, "token_subs"), token);
+        let ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
+        if limit == 0 || start >= ids.len() {
+            return Vec::new(&env);
+        }
+        let end = if start + limit > ids.len() {
+            ids.len()
+        } else {
+            start + limit
+        };
+        let mut out = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            let id = ids.get(i).unwrap();
+            if let Some(sub) = env.storage().instance().get::<u32, Subscription>(&id) {
+                out.push_back(sub);
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Configure statement retention (`keep_recent` detailed rows per subscription). Admin only.

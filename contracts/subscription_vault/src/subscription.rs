@@ -58,8 +58,34 @@ pub fn do_create_subscription(
     usage_enabled: bool,
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
+    let token = crate::admin::get_token(env)?;
+    do_create_subscription_with_token(
+        env,
+        subscriber,
+        merchant,
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+    )
+}
+
+pub fn do_create_subscription_with_token(
+    env: &Env,
+    subscriber: Address,
+    merchant: Address,
+    token: Address,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
     subscriber.require_auth();
     validate_non_negative(amount)?;
+    if !crate::admin::is_token_accepted(env, &token) {
+        return Err(Error::InvalidInput);
+    }
 
     // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
@@ -71,6 +97,7 @@ pub fn do_create_subscription(
     let sub = Subscription {
         subscriber: subscriber.clone(),
         merchant: merchant.clone(),
+        token: token.clone(),
         amount,
         interval_seconds,
         last_payment_timestamp: env.ledger().timestamp(),
@@ -100,6 +127,12 @@ pub fn do_create_subscription(
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
     env.storage().instance().set(&merchant_key, &ids);
+
+    // Maintain token -> subscription-ID index
+    let token_key = (Symbol::new(env, "token_subs"), token);
+    let mut token_ids: Vec<u32> = env.storage().instance().get(&token_key).unwrap_or(Vec::new(env));
+    token_ids.push_back(id);
+    env.storage().instance().set(&token_key, &token_ids);
 
     env.events().publish(
         (symbol_short!("created"), id),
@@ -133,11 +166,7 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
-    let token_addr: Address = env
-        .storage()
-        .instance()
-        .get(&Symbol::new(env, "token"))
-        .ok_or(Error::NotInitialized)?;
+    let token_addr = sub.token.clone();
 
     // ──────────────────────────────────────────────────────────────────────────
     // EFFECTS: Update internal state before external interactions (CEI pattern)
@@ -289,11 +318,7 @@ pub fn do_withdraw_subscriber_funds(
         sub.prepaid_balance = 0;
         env.storage().instance().set(&subscription_id, &sub);
 
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(env, "token"))
-            .ok_or(Error::NotInitialized)?;
+        let token_addr = sub.token.clone();
         let token_client = soroban_sdk::token::Client::new(env, &token_addr);
 
         token_client.transfer(
@@ -323,8 +348,10 @@ pub fn do_create_plan_template(
         }
     }
 
+    let token = crate::admin::get_token(env)?;
     let plan = PlanTemplate {
         merchant,
+        token,
         amount,
         interval_seconds,
         usage_enabled,
@@ -335,6 +362,40 @@ pub fn do_create_plan_template(
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
 
+    Ok(plan_id)
+}
+
+pub fn do_create_plan_template_with_token(
+    env: &Env,
+    merchant: Address,
+    token: Address,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
+    merchant.require_auth();
+    if !crate::admin::is_token_accepted(env, &token) {
+        return Err(Error::InvalidInput);
+    }
+    if let Some(cap) = lifetime_cap {
+        if cap <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+    }
+
+    let plan = PlanTemplate {
+        merchant,
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+    };
+
+    let plan_id = next_plan_id(env);
+    let key = (Symbol::new(env, "plan"), plan_id);
+    env.storage().instance().set(&key, &plan);
     Ok(plan_id)
 }
 
@@ -354,6 +415,7 @@ pub fn do_create_subscription_from_plan(
     let sub = Subscription {
         subscriber: subscriber.clone(),
         merchant: plan.merchant.clone(),
+        token: plan.token.clone(),
         amount: plan.amount,
         interval_seconds: plan.interval_seconds,
         last_payment_timestamp: env.ledger().timestamp(),
@@ -375,6 +437,12 @@ pub fn do_create_subscription_from_plan(
         .unwrap_or(Vec::new(env));
     ids.push_back(id);
     env.storage().instance().set(&merchant_key, &ids);
+
+    // Maintain token -> subscription-ID index
+    let token_key = (Symbol::new(env, "token_subs"), plan.token);
+    let mut token_ids: Vec<u32> = env.storage().instance().get(&token_key).unwrap_or(Vec::new(env));
+    token_ids.push_back(id);
+    env.storage().instance().set(&token_key, &token_ids);
 
     Ok(id)
 }
