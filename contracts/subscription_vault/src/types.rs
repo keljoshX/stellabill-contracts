@@ -224,6 +224,8 @@ pub enum SubscriptionStatus {
 pub struct Subscription {
     pub subscriber: Address,
     pub merchant: Address,
+    /// Settlement token address used for all transfers on this subscription.
+    pub token: Address,
     /// Recurring charge amount per billing interval (in token base units, e.g. stroops for USDC).
     pub amount: i128,
     /// Billing interval in seconds.
@@ -266,6 +268,7 @@ pub struct SubscriptionSummary {
     pub subscription_id: u32,
     pub subscriber: Address,
     pub merchant: Address,
+    pub token: Address,
     pub amount: i128,
     pub interval_seconds: u64,
     pub last_payment_timestamp: u64,
@@ -297,6 +300,8 @@ pub struct MigrationExportEvent {
 pub struct PlanTemplate {
     /// Merchant who owns this plan template.
     pub merchant: Address,
+    /// Settlement token used by subscriptions created from this plan.
+    pub token: Address,
     /// Recurring charge amount per interval (token base units).
     pub amount: i128,
     /// Billing interval in seconds.
@@ -434,6 +439,14 @@ pub struct OraclePrice {
     pub price: i128,
     /// Timestamp when quote was published by oracle.
     pub timestamp: u64,
+}
+
+/// Token registry entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedToken {
+    pub token: Address,
+    pub decimals: u32,
 }
 
 /// Event emitted when emergency stop is enabled.

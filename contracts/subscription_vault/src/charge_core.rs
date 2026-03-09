@@ -158,7 +158,12 @@ pub fn charge_one(
     match safe_sub_balance(sub.prepaid_balance, charge_amount) {
         Ok(new_balance) => {
             sub.prepaid_balance = new_balance;
-            crate::merchant::credit_merchant_balance(env, &sub.merchant, charge_amount)?;
+            crate::merchant::credit_merchant_balance_for_token(
+                env,
+                &sub.merchant,
+                &sub.token,
+                charge_amount,
+            )?;
             sub.last_payment_timestamp = now;
 
             // Accumulate lifetime charged amount

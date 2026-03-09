@@ -96,11 +96,7 @@ pub fn resolve_charge_amount(env: &Env, subscription: &Subscription) -> Result<i
         }
     }
 
-    let token_decimals: u32 = env
-        .storage()
-        .instance()
-        .get(&Symbol::new(env, "token_decimals"))
-        .unwrap_or(6);
+    let token_decimals = crate::admin::get_token_decimals(env, &subscription.token).unwrap_or(6);
 
     let scale = 10i128
         .checked_pow(token_decimals)

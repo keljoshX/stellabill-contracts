@@ -16,26 +16,47 @@ use crate::safe_math::validate_non_negative;
 use crate::types::Error;
 use soroban_sdk::{token, Address, Env, Symbol};
 
-fn merchant_balance_key(env: &Env, merchant: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "merchant_balance"), merchant.clone())
+fn merchant_balance_key(env: &Env, merchant: &Address, token: &Address) -> (Symbol, Address, Address) {
+    (
+        Symbol::new(env, "merchant_balance"),
+        merchant.clone(),
+        token.clone(),
+    )
 }
 
 pub fn get_merchant_balance(env: &Env, merchant: &Address) -> i128 {
-    let key = merchant_balance_key(env, merchant);
+    if let Ok(token_addr) = crate::admin::get_token(env) {
+        return get_merchant_balance_by_token(env, merchant, &token_addr);
+    }
+    0
+}
+
+pub fn get_merchant_balance_by_token(env: &Env, merchant: &Address, token: &Address) -> i128 {
+    let key = merchant_balance_key(env, merchant, token);
     env.storage().instance().get(&key).unwrap_or(0i128)
 }
 
-fn set_merchant_balance(env: &Env, merchant: &Address, balance: &i128) {
-    let key = merchant_balance_key(env, merchant);
+fn set_merchant_balance(env: &Env, merchant: &Address, token: &Address, balance: &i128) {
+    let key = merchant_balance_key(env, merchant, token);
     env.storage().instance().set(&key, balance);
 }
 
 /// Credit merchant balance (used when subscription charges process).
 pub fn credit_merchant_balance(env: &Env, merchant: &Address, amount: i128) -> Result<(), Error> {
+    let token_addr = crate::admin::get_token(env)?;
+    credit_merchant_balance_for_token(env, merchant, &token_addr, amount)
+}
+
+pub fn credit_merchant_balance_for_token(
+    env: &Env,
+    merchant: &Address,
+    token_addr: &Address,
+    amount: i128,
+) -> Result<(), Error> {
     validate_non_negative(amount)?;
-    let current = get_merchant_balance(env, merchant);
+    let current = get_merchant_balance_by_token(env, merchant, token_addr);
     let new_balance = current.checked_add(amount).ok_or(Error::Overflow)?;
-    set_merchant_balance(env, merchant, &new_balance);
+    set_merchant_balance(env, merchant, token_addr, &new_balance);
     Ok(())
 }
 
@@ -49,6 +70,16 @@ pub fn credit_merchant_balance(env: &Env, merchant: &Address, amount: i128) -> R
 /// This ordering ensures that if the token contract attempts a callback into our contract,
 /// our internal state will already be consistent and the merchant balance will be correct.
 pub fn withdraw_merchant_funds(env: &Env, merchant: Address, amount: i128) -> Result<(), Error> {
+    let token_addr = crate::admin::get_token(env)?;
+    withdraw_merchant_funds_for_token(env, merchant, token_addr, amount)
+}
+
+pub fn withdraw_merchant_funds_for_token(
+    env: &Env,
+    merchant: Address,
+    token_addr: Address,
+    amount: i128,
+) -> Result<(), Error> {
     merchant.require_auth();
     if amount <= 0 {
         return Err(Error::InvalidAmount);
@@ -57,7 +88,7 @@ pub fn withdraw_merchant_funds(env: &Env, merchant: Address, amount: i128) -> Re
     // ──────────────────────────────────────────────────────────────────────────
     // CHECKS: Validate all preconditions before any state mutations
     // ──────────────────────────────────────────────────────────────────────────
-    let current = get_merchant_balance(env, &merchant);
+    let current = get_merchant_balance_by_token(env, &merchant, &token_addr);
     if current == 0 {
         return Err(Error::NotFound);
     }
@@ -66,12 +97,11 @@ pub fn withdraw_merchant_funds(env: &Env, merchant: Address, amount: i128) -> Re
     }
 
     let new_balance = current.checked_sub(amount).ok_or(Error::Overflow)?;
-    let token_addr = crate::admin::get_token(env)?;
 
     // ──────────────────────────────────────────────────────────────────────────
     // EFFECTS: Update internal state before external interactions (CEI pattern)
     // ──────────────────────────────────────────────────────────────────────────
-    set_merchant_balance(env, &merchant, &new_balance);
+    set_merchant_balance(env, &merchant, &token_addr, &new_balance);
     env.events()
         .publish((Symbol::new(env, "withdrawn"), merchant.clone()), amount);
 

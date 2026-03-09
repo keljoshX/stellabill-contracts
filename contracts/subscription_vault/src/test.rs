@@ -508,6 +508,7 @@ fn test_subscription_struct_status_field() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: 100_000_000,
         interval_seconds: 30 * 24 * 60 * 60,
         last_payment_timestamp: 0,
@@ -529,6 +530,7 @@ fn test_subscription_struct_with_lifetime_cap() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: 10_000_000,
         interval_seconds: 30 * 24 * 60 * 60,
         last_payment_timestamp: 0,
@@ -843,6 +845,7 @@ fn test_compute_next_charge_info_active() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 1000,
@@ -863,6 +866,7 @@ fn test_compute_next_charge_info_paused() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 2000,
@@ -883,6 +887,7 @@ fn test_compute_next_charge_info_cancelled() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 5000,
@@ -902,6 +907,7 @@ fn test_compute_next_charge_info_insufficient_balance() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: INTERVAL,
         last_payment_timestamp: 3000,
@@ -921,6 +927,7 @@ fn test_compute_next_charge_info_overflow_protection() {
     let sub = Subscription {
         subscriber: Address::generate(&env),
         merchant: Address::generate(&env),
+        token: Address::generate(&env),
         amount: AMOUNT,
         interval_seconds: 200,
         last_payment_timestamp: u64::MAX - 100,
@@ -2200,4 +2207,77 @@ fn test_oracle_stale_quote_rejected() {
 
     let result = client.try_charge_subscription(&id);
     assert_eq!(result, Err(Ok(Error::OraclePriceStale)));
+}
+
+#[test]
+fn test_multi_token_balances_are_isolated_per_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    let subscriber_a = Address::generate(&env);
+    let subscriber_b = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_a).mint(&subscriber_a, &100_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_b).mint(&subscriber_b, &100_000_000i128);
+
+    let id_a = client.create_subscription(
+        &subscriber_a,
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let id_b = client.create_subscription_with_token(
+        &subscriber_b,
+        &merchant,
+        &token_b,
+        &7_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
+    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
+
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 5_000_000i128);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 7_000_000i128);
+}
+
+#[test]
+fn test_create_subscription_with_unaccepted_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token, _admin) = setup_contract(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let unsupported = Address::generate(&env);
+    let result = client.try_create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &unsupported,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
