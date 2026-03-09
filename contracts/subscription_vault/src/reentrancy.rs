@@ -44,6 +44,7 @@ use soroban_sdk::{Env, Symbol};
 ///
 /// When created, it sets a lock in storage. When dropped, it clears the lock.
 /// If a lock already exists, creation fails with `Error::Reentrancy`.
+#[allow(dead_code)]
 pub struct ReentrancyGuard {
     lock_key: Symbol,
     env: *const Env,
@@ -63,6 +64,7 @@ impl ReentrancyGuard {
     /// # Safety
     /// This function is unsafe because it stores a raw pointer to the environment.
     /// The pointer must remain valid for the lifetime of the guard.
+    #[allow(dead_code)]
     pub fn lock(env: &Env, function_name: &str) -> Result<Self, Error> {
         let lock_key = Symbol::new(env, function_name);
 
@@ -98,6 +100,7 @@ impl Drop for ReentrancyGuard {
 ///
 /// This returns `true` if the Soroban SDK version supports the necessary storage features.
 /// It's provided for compatibility checking and logging.
+#[allow(dead_code)]
 pub fn is_reentrancy_supported() -> bool {
     // If the SDK supports symbols and instance storage, reentrancy guards work.
     // This is always true in current Soroban SDK versions.

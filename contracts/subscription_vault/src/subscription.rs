@@ -27,6 +27,7 @@ use crate::state_machine::validate_status_transition;
 use crate::types::{DataKey, Error, PlanTemplate, Subscription, SubscriptionStatus};
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+#[allow(dead_code)]
 pub fn next_id(env: &Env) -> u32 {
     let key = Symbol::new(env, "next_id");
     let storage = env.storage().instance();
@@ -57,16 +58,7 @@ pub fn do_create_subscription(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
-
-    // Blocklist check: prevent blocklisted subscribers from creating subscriptions
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
-
     validate_non_negative(amount)?;
-    if interval_seconds == 0 {
-        return Err(Error::InvalidInput);
-    }
 
     // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
@@ -75,23 +67,15 @@ pub fn do_create_subscription(
         }
     }
 
-    let now = env.ledger().timestamp();
     let sub = Subscription {
         subscriber: subscriber.clone(),
         merchant: merchant.clone(),
         amount,
         interval_seconds,
-        last_payment_timestamp: now,
+        last_payment_timestamp: env.ledger().timestamp(),
         status: SubscriptionStatus::Active,
         prepaid_balance: 0i128,
         usage_enabled,
-        expiration: None,
-        billing_anchor_timestamp: now,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap,
         lifetime_charged: 0i128,
     };
@@ -137,11 +121,6 @@ pub fn do_deposit_funds(
     amount: i128,
 ) -> Result<(), Error> {
     subscriber.require_auth();
-
-    // Blocklist check: prevent blocklisted subscribers from depositing funds
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // CHECKS: Validate all preconditions before any state mutations
@@ -356,14 +335,8 @@ pub fn do_create_subscription_from_plan(
 ) -> Result<u32, Error> {
     subscriber.require_auth();
 
-    // Blocklist check: prevent blocklisted subscribers from creating subscriptions
-    if crate::blocklist::is_blocklisted(env, &subscriber) {
-        return Err(Error::SubscriberBlocklisted);
-    }
-
     let plan = get_plan_template(env, plan_template_id)?;
 
-    let now = env.ledger().timestamp();
     let key = Symbol::new(env, "next_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
     env.storage().instance().set(&key, &(id + 1));
@@ -373,17 +346,10 @@ pub fn do_create_subscription_from_plan(
         merchant: plan.merchant.clone(),
         amount: plan.amount,
         interval_seconds: plan.interval_seconds,
-        last_payment_timestamp: now,
+        last_payment_timestamp: env.ledger().timestamp(),
         status: SubscriptionStatus::Active,
         prepaid_balance: 0i128,
         usage_enabled: plan.usage_enabled,
-        expiration: None,
-        billing_anchor_timestamp: now,
-        current_period_index: 0,
-        current_period_usage_units: 0,
-        usage_cap_units: None,
-        usage_rate_limit_max_calls: None,
-        usage_rate_window_secs: 0,
         lifetime_cap: plan.lifetime_cap,
         lifetime_charged: 0i128,
     };
@@ -401,48 +367,4 @@ pub fn do_create_subscription_from_plan(
     env.storage().instance().set(&merchant_key, &ids);
 
     Ok(id)
-}
-
-pub fn do_set_usage_cap(
-    env: &Env,
-    subscription_id: u32,
-    authorizer: Address,
-    usage_cap_units: Option<i128>,
-) -> Result<(), Error> {
-    authorizer.require_auth();
-    let mut sub = get_subscription(env, subscription_id)?;
-    if authorizer != sub.merchant {
-        return Err(Error::Forbidden);
-    }
-    if let Some(cap) = usage_cap_units {
-        if cap <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-    }
-    sub.usage_cap_units = usage_cap_units;
-    env.storage().instance().set(&subscription_id, &sub);
-    Ok(())
-}
-
-pub fn do_set_usage_rate_limit(
-    env: &Env,
-    subscription_id: u32,
-    authorizer: Address,
-    max_calls: Option<u32>,
-    window_seconds: u64,
-) -> Result<(), Error> {
-    authorizer.require_auth();
-    let mut sub = get_subscription(env, subscription_id)?;
-    if authorizer != sub.merchant {
-        return Err(Error::Forbidden);
-    }
-    if let Some(max) = max_calls {
-        if max == 0 || window_seconds == 0 {
-            return Err(Error::InvalidInput);
-        }
-    }
-    sub.usage_rate_limit_max_calls = max_calls;
-    sub.usage_rate_window_secs = window_seconds;
-    env.storage().instance().set(&subscription_id, &sub);
-    Ok(())
 }
