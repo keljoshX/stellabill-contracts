@@ -1415,7 +1415,7 @@ fn test_update_plan_template_creates_new_version_and_preserves_old() {
         &plan_id,
         &new_amount,
         &new_interval,
-        &true,
+        &false,
         &Some(cap),
     );
 
@@ -1432,7 +1432,7 @@ fn test_update_plan_template_creates_new_version_and_preserves_old() {
     assert_eq!(updated.template_key, original_after.template_key);
     assert_eq!(updated.amount, new_amount);
     assert_eq!(updated.interval_seconds, new_interval);
-    assert!(updated.usage_enabled);
+    assert!(!updated.usage_enabled);
     assert_eq!(updated.lifetime_cap, Some(cap));
 }
 
@@ -1459,7 +1459,7 @@ fn test_migrate_subscription_to_new_plan_version() {
         &plan_id,
         &new_amount,
         &new_interval,
-        &true,
+        &false,
         &Some(cap),
     );
 
@@ -1474,7 +1474,7 @@ fn test_migrate_subscription_to_new_plan_version() {
     let after = client.get_subscription(&sub_id);
     assert_eq!(after.amount, new_amount);
     assert_eq!(after.interval_seconds, new_interval);
-    assert!(after.usage_enabled);
+    assert!(!after.usage_enabled);
     // Lifetime tracking is preserved.
     assert_eq!(after.lifetime_charged, 0);
     assert_eq!(after.lifetime_cap, Some(cap));
