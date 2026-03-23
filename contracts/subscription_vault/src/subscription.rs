@@ -23,9 +23,8 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    Subscription, SubscriptionCancelledEvent,
-    SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
-    SubscriptionStatus,
+    Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent, SubscriptionPausedEvent,
+    SubscriptionResumedEvent, SubscriptionStatus,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
