@@ -23,7 +23,8 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    Subscription, SubscriptionMigratedEvent, SubscriptionStatus,
+    SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
+    SubscriptionStatus,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -358,9 +359,19 @@ pub fn do_cancel_subscription(
     }
 
     validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+    let refund_amount = sub.prepaid_balance;
     sub.status = SubscriptionStatus::Cancelled;
 
     env.storage().instance().set(&subscription_id, &sub);
+
+    env.events().publish(
+        (Symbol::new(env, "subscription_cancelled"), subscription_id),
+        SubscriptionCancelledEvent {
+            subscription_id,
+            authorizer,
+            refund_amount,
+        },
+    );
     Ok(())
 }
 
@@ -467,19 +478,30 @@ pub fn do_withdraw_subscriber_funds(
     }
 
     let amount_to_refund = sub.prepaid_balance;
-    if amount_to_refund > 0 {
-        sub.prepaid_balance = 0;
-        env.storage().instance().set(&subscription_id, &sub);
-
-        let token_addr = sub.token.clone();
-        let token_client = soroban_sdk::token::Client::new(env, &token_addr);
-
-        token_client.transfer(
-            &env.current_contract_address(),
-            &subscriber,
-            &amount_to_refund,
-        );
+    if amount_to_refund <= 0 {
+        return Err(Error::InvalidAmount);
     }
+
+    sub.prepaid_balance = 0;
+    env.storage().instance().set(&subscription_id, &sub);
+
+    let token_addr = sub.token.clone();
+    let token_client = soroban_sdk::token::Client::new(env, &token_addr);
+
+    token_client.transfer(
+        &env.current_contract_address(),
+        &subscriber,
+        &amount_to_refund,
+    );
+
+    env.events().publish(
+        (Symbol::new(env, "subscriber_withdrawal"), subscription_id),
+        SubscriberWithdrawalEvent {
+            subscription_id,
+            subscriber,
+            amount: amount_to_refund,
+        },
+    );
 
     Ok(())
 }

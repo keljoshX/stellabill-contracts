@@ -598,6 +598,15 @@ pub struct MerchantWithdrawalEvent {
     pub amount: i128,
 }
 
+/// Event emitted when a subscriber withdraws funds after cancellation.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriberWithdrawalEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub amount: i128,
+}
+
 /// Event emitted when a merchant-initiated one-off charge is applied.
 #[contracttype]
 #[derive(Clone, Debug)]
