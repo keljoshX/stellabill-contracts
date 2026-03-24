@@ -226,6 +226,12 @@ pub enum Error {
     MaxConcurrentSubscriptionsReached = 1031,
     /// Subscriber's configured credit limit would be exceeded.
     CreditLimitExceeded = 1032,
+
+    // --- Admin Rotation (1033-1034) ---
+    /// Rotation target is the same as the current admin (self-rotation disallowed).
+    SelfRotation = 1033,
+    /// The proposed new admin address is invalid (e.g. zero-equivalent placeholder).
+    InvalidNewAdmin = 1034,
 }
 
 impl Error {
@@ -266,6 +272,8 @@ impl Error {
             Error::SubscriptionLimitReached => 429,
             Error::MaxConcurrentSubscriptionsReached => 1031,
             Error::CreditLimitExceeded => 1032,
+            Error::SelfRotation => 1033,
+            Error::InvalidNewAdmin => 1034,
         }
     }
 }
@@ -500,6 +508,15 @@ pub struct AcceptedToken {
 #[derive(Clone, Debug)]
 pub struct EmergencyStopEnabledEvent {
     pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Event emitted when admin is rotated to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminRotatedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
     pub timestamp: u64,
 }
 
