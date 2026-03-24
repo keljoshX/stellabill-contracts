@@ -230,6 +230,12 @@ pub enum Error {
     MaxConcurrentSubscriptionsReached = 1031,
     /// Subscriber's configured credit limit would be exceeded.
     CreditLimitExceeded = 1032,
+
+    // --- Admin Rotation (1033-1034) ---
+    /// Rotation target is the same as the current admin (self-rotation disallowed).
+    SelfRotation = 1033,
+    /// The proposed new admin address is invalid (e.g. zero-equivalent placeholder).
+    InvalidNewAdmin = 1034,
 }
 
 impl Error {
@@ -271,6 +277,8 @@ impl Error {
             Error::SubscriptionLimitReached => 429,
             Error::MaxConcurrentSubscriptionsReached => 1031,
             Error::CreditLimitExceeded => 1032,
+            Error::SelfRotation => 1033,
+            Error::InvalidNewAdmin => 1034,
         }
     }
 }
@@ -508,6 +516,15 @@ pub struct EmergencyStopEnabledEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when admin is rotated to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminRotatedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
+    pub timestamp: u64,
+}
+
 /// Event emitted when emergency stop is disabled.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -603,6 +620,15 @@ pub struct MerchantWithdrawalEvent {
     pub amount: i128,
 }
 
+/// Event emitted when a subscriber withdraws funds after cancellation.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriberWithdrawalEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub amount: i128,
+}
+
 /// Event emitted when a merchant-initiated one-off charge is applied.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -694,6 +720,16 @@ pub struct PartialRefundEvent {
     pub subscriber: Address,
     /// Amount refunded in token base units.
     pub amount: i128,
+    /// Ledger timestamp when the refund was processed.
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MerchantConfig {
+    pub fee_address: Option<Address>,
+    pub redirect_url: String, // e.g., for off-chain success callbacks
+    pub is_paused: bool,      // Global pause for all merchant plans
 }
 
 /// Event emitted when a merchant enables their blanket pause.

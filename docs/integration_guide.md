@@ -33,12 +33,12 @@ The integration interacts with specific functions defined in `contracts/subscrip
    - **Errors to handle:** 
      - `Error::IntervalNotElapsed` (1001) if called too early.
      - `Error::NotActive` (1002) if paused or cancelled.
-     - `Error::InsufficientBalance` (1003) if the prepaid balance is too low.
+     - `Error::InsufficientBalance` (1003) if the prepaid balance is too low. Failed single charges do not persist hidden ledger mutations.
 
 2. **`batch_charge(env: Env, subscription_ids: Vec<u32>) -> Result<Vec<BatchChargeResult>, Error>`**
    - **Purpose:** Process multiple subscriptions in a single transaction. Recommended for efficiency.
    - **Parameters:** A vector of `subscription_id`s.
-   - **Returns:** A vector of `BatchChargeResult` objects `{ success: bool, error_code: u32 }`. If `success` is false, `error_code` reflects why the individual charge failed. The transaction *does not revert* if a single charge within the batch fails.
+   - **Returns:** A vector of `BatchChargeResult` objects `{ success: bool, error_code: u32 }`. If `success` is false, `error_code` reflects why the individual charge failed. Successful items commit normally; failed items do not persist hidden ledger mutations.
    - **Authorization:** Requires the signature of the `admin` address.
 
 ### For Indexers & UIs (View Helpers)
