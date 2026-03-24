@@ -3,7 +3,7 @@ use crate::{
     AdminRotatedEvent, Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
     SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
@@ -99,6 +99,42 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
             .instance()
             .set(&soroban_sdk::Symbol::new(env, "next_id"), &value);
     });
+}
+
+fn snapshot_subscriptions(
+    client: &SubscriptionVaultClient,
+    ids: &[u32],
+) -> alloc::vec::Vec<Subscription> {
+    ids.iter().map(|id| client.get_subscription(id)).collect()
+}
+
+fn collect_batch_result_codes(
+    env: &Env,
+    client: &SubscriptionVaultClient,
+    ids: &[u32],
+) -> alloc::vec::Vec<(bool, u32)> {
+    let ids_vec = ids.iter().fold(SorobanVec::new(env), |mut acc, id| {
+        acc.push_back(*id);
+        acc
+    });
+    let results = client.batch_charge(&ids_vec);
+    results
+        .iter()
+        .map(|result| (result.success, result.error_code))
+        .collect()
+}
+
+fn collect_single_charge_result_codes(
+    client: &SubscriptionVaultClient,
+    ids: &[u32],
+) -> alloc::vec::Vec<(bool, u32)> {
+    ids.iter()
+        .map(|id| match client.try_charge_subscription(id) {
+            Ok(Ok(())) => (true, 0),
+            Err(Ok(err)) => (false, err.to_code()),
+            other => panic!("unexpected charge result: {other:?}"),
+        })
+        .collect()
 }
 
 #[contract]
@@ -860,6 +896,266 @@ fn test_batch_charge() {
     assert_eq!(results.len(), 2);
     assert!(results.get(0).unwrap().success);
     assert!(results.get(1).unwrap().success);
+}
+
+#[test]
+fn test_batch_charge_matches_single_charge_semantics_for_identical_inputs() {
+    let (env_batch, client_batch, _, _) = setup_test_env();
+    let (env_single, client_single, _, _) = setup_test_env();
+
+    env_batch.ledger().set_timestamp(T0);
+    env_single.ledger().set_timestamp(T0);
+
+    let mut ids_batch = [0u32; 3];
+    let mut ids_single = [0u32; 3];
+    let mut merchants_batch = alloc::vec::Vec::new();
+    let mut merchants_single = alloc::vec::Vec::new();
+
+    for idx in 0..3 {
+        let (id_batch, _, merchant_batch) =
+            create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+        let (id_single, _, merchant_single) =
+            create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+        seed_balance(&env_batch, &client_batch, id_batch, PREPAID);
+        seed_balance(&env_single, &client_single, id_single, PREPAID);
+        ids_batch[idx] = id_batch;
+        ids_single[idx] = id_single;
+        merchants_batch.push(merchant_batch);
+        merchants_single.push(merchant_single);
+    }
+
+    env_batch.ledger().set_timestamp(T0 + INTERVAL + 1);
+    env_single.ledger().set_timestamp(T0 + INTERVAL + 1);
+
+    let batch_results = collect_batch_result_codes(&env_batch, &client_batch, &ids_batch);
+    let single_results = collect_single_charge_result_codes(&client_single, &ids_single);
+
+    assert_eq!(batch_results, single_results);
+    assert_eq!(batch_results, alloc::vec![(true, 0), (true, 0), (true, 0)]);
+
+    let batch_snapshots = snapshot_subscriptions(&client_batch, &ids_batch);
+    let single_snapshots = snapshot_subscriptions(&client_single, &ids_single);
+    for (batch_sub, single_sub) in batch_snapshots.iter().zip(single_snapshots.iter()) {
+        assert_eq!(batch_sub.prepaid_balance, single_sub.prepaid_balance);
+        assert_eq!(batch_sub.last_payment_timestamp, single_sub.last_payment_timestamp);
+        assert_eq!(batch_sub.status, single_sub.status);
+        assert_eq!(batch_sub.lifetime_charged, single_sub.lifetime_charged);
+    }
+
+    for (merchant_batch, merchant_single) in merchants_batch.iter().zip(merchants_single.iter()) {
+        assert_eq!(
+            client_batch.get_merchant_balance(merchant_batch),
+            client_single.get_merchant_balance(merchant_single)
+        );
+    }
+}
+
+#[test]
+fn test_batch_charge_mixed_results_preserve_single_path_order_and_error_codes() {
+    let (env_batch, client_batch, _, _) = setup_test_env();
+    let (env_single, client_single, _, _) = setup_test_env();
+
+    env_batch.ledger().set_timestamp(T0);
+    env_single.ledger().set_timestamp(T0);
+
+    let (valid_batch, _, merchant_valid_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+    let (valid_single, _, merchant_valid_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+    seed_balance(&env_batch, &client_batch, valid_batch, PREPAID);
+    seed_balance(&env_single, &client_single, valid_single, PREPAID);
+
+    let (low_batch, _, merchant_low_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+    let (low_single, _, merchant_low_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+    seed_balance(&env_batch, &client_batch, low_batch, AMOUNT - 1);
+    seed_balance(&env_single, &client_single, low_single, AMOUNT - 1);
+
+    let (paused_batch, _, merchant_paused_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Paused);
+    let (paused_single, _, merchant_paused_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Paused);
+    seed_balance(&env_batch, &client_batch, paused_batch, PREPAID);
+    seed_balance(&env_single, &client_single, paused_single, PREPAID);
+
+    env_batch.ledger().set_timestamp(T0 + INTERVAL + 1);
+    env_single.ledger().set_timestamp(T0 + INTERVAL + 1);
+
+    let ids_batch = [valid_batch, low_batch, paused_batch, 999_999u32, valid_batch];
+    let ids_single = [valid_single, low_single, paused_single, 999_999u32, valid_single];
+
+    let batch_results = collect_batch_result_codes(&env_batch, &client_batch, &ids_batch);
+    let single_results = collect_single_charge_result_codes(&client_single, &ids_single);
+
+    assert_eq!(batch_results, single_results);
+    assert_eq!(
+        batch_results,
+        alloc::vec![
+            (true, 0),
+            (false, Error::InsufficientBalance.to_code()),
+            (false, Error::NotActive.to_code()),
+            (false, Error::NotFound.to_code()),
+            (false, Error::Replay.to_code()),
+        ]
+    );
+
+    let tracked_batch = [valid_batch, low_batch, paused_batch];
+    let tracked_single = [valid_single, low_single, paused_single];
+    let batch_snapshots = snapshot_subscriptions(&client_batch, &tracked_batch);
+    let single_snapshots = snapshot_subscriptions(&client_single, &tracked_single);
+    for (batch_sub, single_sub) in batch_snapshots.iter().zip(single_snapshots.iter()) {
+        assert_eq!(batch_sub.prepaid_balance, single_sub.prepaid_balance);
+        assert_eq!(batch_sub.last_payment_timestamp, single_sub.last_payment_timestamp);
+        assert_eq!(batch_sub.status, single_sub.status);
+    }
+
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_valid_batch),
+        client_single.get_merchant_balance(&merchant_valid_single)
+    );
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_low_batch),
+        client_single.get_merchant_balance(&merchant_low_single)
+    );
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_paused_batch),
+        client_single.get_merchant_balance(&merchant_paused_single)
+    );
+}
+
+#[test]
+fn test_batch_charge_failed_items_match_single_path_without_cross_item_side_effects() {
+    let (env_batch, client_batch, _, _) = setup_test_env();
+    let (env_single, client_single, _, _) = setup_test_env();
+
+    env_batch.ledger().set_timestamp(T0);
+    env_single.ledger().set_timestamp(T0);
+
+    let (ok_one_batch, _, merchant_ok_one_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+    let (ok_one_single, _, merchant_ok_one_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+    seed_balance(&env_batch, &client_batch, ok_one_batch, PREPAID);
+    seed_balance(&env_single, &client_single, ok_one_single, PREPAID);
+
+    let (failing_batch, _, merchant_failing_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+    let (failing_single, _, merchant_failing_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+    seed_balance(&env_batch, &client_batch, failing_batch, 1);
+    seed_balance(&env_single, &client_single, failing_single, 1);
+
+    let (ok_two_batch, _, merchant_ok_two_batch) =
+        create_test_subscription(&env_batch, &client_batch, SubscriptionStatus::Active);
+    let (ok_two_single, _, merchant_ok_two_single) =
+        create_test_subscription(&env_single, &client_single, SubscriptionStatus::Active);
+    seed_balance(&env_batch, &client_batch, ok_two_batch, PREPAID);
+    seed_balance(&env_single, &client_single, ok_two_single, PREPAID);
+
+    env_batch.ledger().set_timestamp(T0 + INTERVAL + 1);
+    env_single.ledger().set_timestamp(T0 + INTERVAL + 1);
+
+    let ids_batch = [ok_one_batch, failing_batch, ok_two_batch];
+    let ids_single = [ok_one_single, failing_single, ok_two_single];
+
+    let batch_results = collect_batch_result_codes(&env_batch, &client_batch, &ids_batch);
+    let single_results = collect_single_charge_result_codes(&client_single, &ids_single);
+
+    assert_eq!(batch_results, single_results);
+    assert_eq!(
+        batch_results,
+        alloc::vec![
+            (true, 0),
+            (false, Error::InsufficientBalance.to_code()),
+            (true, 0),
+        ]
+    );
+
+    let batch_snapshots = snapshot_subscriptions(&client_batch, &ids_batch);
+    let single_snapshots = snapshot_subscriptions(&client_single, &ids_single);
+    for (batch_sub, single_sub) in batch_snapshots.iter().zip(single_snapshots.iter()) {
+        assert_eq!(batch_sub.prepaid_balance, single_sub.prepaid_balance);
+        assert_eq!(batch_sub.last_payment_timestamp, single_sub.last_payment_timestamp);
+        assert_eq!(batch_sub.status, single_sub.status);
+    }
+
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_ok_one_batch),
+        client_single.get_merchant_balance(&merchant_ok_one_single)
+    );
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_failing_batch),
+        client_single.get_merchant_balance(&merchant_failing_single)
+    );
+    assert_eq!(
+        client_batch.get_merchant_balance(&merchant_ok_two_batch),
+        client_single.get_merchant_balance(&merchant_ok_two_single)
+    );
+}
+
+#[test]
+fn test_batch_charge_high_volume_list_matches_single_path_semantics() {
+    let (env_batch, client_batch, _, _) = setup_test_env();
+    let (env_single, client_single, _, _) = setup_test_env();
+
+    env_batch.ledger().set_timestamp(T0);
+    env_single.ledger().set_timestamp(T0);
+
+    let mut ids_batch = alloc::vec::Vec::new();
+    let mut ids_single = alloc::vec::Vec::new();
+    let mut merchants_batch = alloc::vec::Vec::new();
+    let mut merchants_single = alloc::vec::Vec::new();
+
+    for idx in 0..20 {
+        let status = if idx % 5 == 0 {
+            SubscriptionStatus::Paused
+        } else {
+            SubscriptionStatus::Active
+        };
+        let (id_batch, _, merchant_batch) = create_test_subscription(&env_batch, &client_batch, status.clone());
+        let (id_single, _, merchant_single) = create_test_subscription(&env_single, &client_single, status);
+
+        let balance = if idx % 2 == 0 { PREPAID } else { AMOUNT - 1 };
+        seed_balance(&env_batch, &client_batch, id_batch, balance);
+        seed_balance(&env_single, &client_single, id_single, balance);
+
+        ids_batch.push(id_batch);
+        ids_single.push(id_single);
+        merchants_batch.push(merchant_batch);
+        merchants_single.push(merchant_single);
+    }
+
+    env_batch.ledger().set_timestamp(T0 + INTERVAL + 1);
+    env_single.ledger().set_timestamp(T0 + INTERVAL + 1);
+
+    let mut input_batch = ids_batch.clone();
+    let mut input_single = ids_single.clone();
+    input_batch.push(ids_batch[2]);
+    input_batch.push(ids_batch[7]);
+    input_single.push(ids_single[2]);
+    input_single.push(ids_single[7]);
+
+    let batch_results = collect_batch_result_codes(&env_batch, &client_batch, &input_batch);
+    let single_results = collect_single_charge_result_codes(&client_single, &input_single);
+
+    assert_eq!(batch_results, single_results);
+    assert_eq!(batch_results.len(), 22);
+
+    let batch_snapshots = snapshot_subscriptions(&client_batch, &ids_batch);
+    let single_snapshots = snapshot_subscriptions(&client_single, &ids_single);
+    for (batch_sub, single_sub) in batch_snapshots.iter().zip(single_snapshots.iter()) {
+        assert_eq!(batch_sub.prepaid_balance, single_sub.prepaid_balance);
+        assert_eq!(batch_sub.last_payment_timestamp, single_sub.last_payment_timestamp);
+        assert_eq!(batch_sub.status, single_sub.status);
+    }
+
+    for (merchant_batch, merchant_single) in merchants_batch.iter().zip(merchants_single.iter()) {
+        assert_eq!(
+            client_batch.get_merchant_balance(merchant_batch),
+            client_single.get_merchant_balance(merchant_single)
+        );
+    }
 }
 
 // -- Next charge info test ----------------------------------------------------
