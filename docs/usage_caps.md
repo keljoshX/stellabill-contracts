@@ -1,17 +1,29 @@
 # Usage Caps
 
-Subscriptions with `usage_enabled=true` can define an optional per-period hard cap:
+Subscriptions with `usage_enabled=true` can define an optional per-period hard cap and a lifetime cap.
 
+## Per-Period Caps
+
+Configured via `configure_usage_limits`:
 - `usage_cap_units: Option<i128>`
 
-Behavior:
+### Behavior:
+- Usage charges increment `current_period_usage_units` in `UsageState`.
+- If a charge would cause `current_period_usage_units + amount > usage_cap_units`, the transaction is rejected with `UsageCapExceeded (1034)`.
+- The period index is tracked as `now / interval_seconds`. When the contract rolls into a new billing period, `current_period_usage_units` automatically resets to `0` before applying the new charge.
 
-- usage charges increment `current_period_usage_units`
-- if a charge would exceed the cap, the transaction is rejected
-- cap counters reset when the contract rolls into a new billing period on a successful charge
+### Notes:
+- Caps are configured by the merchant for each subscription.
+- The rejection path is deterministic and storage-efficient (no iteration over past statements required).
 
-Notes:
+## Lifetime Caps
 
-- caps are configured by the merchant for each subscription
-- rejection path is deterministic and storage-efficient
-- cap-reached events are emitted for off-chain alerting
+Configured at subscription creation (or inherited from plan templates):
+- `lifetime_cap: Option<i128>`
+
+### Behavior:
+- Both interval charges and usage charges increment `lifetime_charged`.
+- If a usage charge exceeds the remaining lifetime cap:
+  - The charge is aborted.
+  - The subscription is automatically transitioned to `Cancelled`.
+  - A `LifetimeCapReachedEvent` is emitted.

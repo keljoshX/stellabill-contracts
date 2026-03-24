@@ -16,9 +16,10 @@ use crate::safe_math::safe_sub_balance;
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus,
+    BillingChargeKind, DataKey, Error, LifetimeCapReachedEvent, SubscriptionChargedEvent,
+    SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
 };
-use soroban_sdk::{symbol_short, Env, Symbol};
+use soroban_sdk::{symbol_short, Env, String, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
 const KEY_IDEM: Symbol = symbol_short!("idem");
@@ -205,7 +206,12 @@ pub fn charge_one(
 }
 
 /// Debit a metered `usage_amount` from a subscription's prepaid balance.
-pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
+pub fn charge_usage_one(
+    env: &Env,
+    subscription_id: u32,
+    usage_amount: i128,
+    reference: String,
+) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
 
     if sub.status != SubscriptionStatus::Active {
@@ -224,18 +230,94 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         return Err(Error::InsufficientPrepaidBalance);
     }
 
-    // -- Lifetime cap pre-check -----------------------------------------------
-    if let Some(cap) = sub.lifetime_cap {
-        let new_charged = sub
-            .lifetime_charged
+    let now = env.ledger().timestamp();
+    let storage = env.storage().instance();
+
+    // Replay Protection
+    let ref_key = DataKey::UsageReference(subscription_id);
+    if let Some(last_ref) = storage.get::<_, String>(&ref_key) {
+        if last_ref == reference {
+            return Err(Error::Replay);
+        }
+    }
+
+    // Rate Limiting and Burst Protection
+    if let Some(limits) = storage.get::<_, UsageLimits>(&DataKey::UsageLimits(subscription_id)) {
+        let mut state: UsageState = storage
+            .get(&DataKey::UsageState(subscription_id))
+            .unwrap_or(UsageState {
+                last_usage_timestamp: 0,
+                window_start_timestamp: now,
+                window_call_count: 0,
+                current_period_usage_units: 0,
+                period_index: 0,
+            });
+
+        // Burst protection
+        if state.last_usage_timestamp > 0 {
+            let elapsed = now.saturating_sub(state.last_usage_timestamp);
+            if elapsed < limits.burst_min_interval_secs {
+                return Err(Error::BurstLimitExceeded);
+            }
+        }
+
+        // Period Cap Check
+        let current_period_index = if sub.interval_seconds > 0 {
+            now / sub.interval_seconds
+        } else {
+            0
+        };
+
+        if state.period_index != current_period_index {
+            state.current_period_usage_units = 0;
+            state.period_index = current_period_index;
+        }
+
+        if let Some(cap) = limits.usage_cap_units {
+            let projected_usage = state
+                .current_period_usage_units
+                .checked_add(usage_amount)
+                .ok_or(Error::Overflow)?;
+            if projected_usage > cap {
+                return Err(Error::UsageCapExceeded);
+            }
+        }
+
+        // Rate Limit Window Check
+        if let Some(max_calls) = limits.rate_limit_max_calls {
+            let window_elapsed = now.saturating_sub(state.window_start_timestamp);
+            if window_elapsed >= limits.rate_window_secs {
+                state.window_start_timestamp = now;
+                state.window_call_count = 0;
+            }
+
+            if state.window_call_count >= max_calls {
+                return Err(Error::RateLimitExceeded);
+            }
+            state.window_call_count = state.window_call_count.saturating_add(1);
+        }
+
+        state.current_period_usage_units = state
+            .current_period_usage_units
             .checked_add(usage_amount)
             .ok_or(Error::Overflow)?;
+        state.last_usage_timestamp = now;
+
+        storage.set(&DataKey::UsageState(subscription_id), &state);
+    }
+
+    // -- Lifetime cap pre-check -----------------------------------------------
+    let new_charged = sub
+        .lifetime_charged
+        .checked_add(usage_amount)
+        .ok_or(Error::Overflow)?;
+
+    if let Some(cap) = sub.lifetime_cap {
         if new_charged > cap {
             validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
             sub.status = SubscriptionStatus::Cancelled;
             env.storage().instance().set(&subscription_id, &sub);
 
-            let now = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
                 LifetimeCapReachedEvent {
@@ -248,13 +330,20 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
 
             return Ok(());
         }
-        sub.lifetime_charged = new_charged;
     }
+    sub.lifetime_charged = new_charged;
 
     sub.prepaid_balance = sub
         .prepaid_balance
         .checked_sub(usage_amount)
         .ok_or(Error::Overflow)?;
+
+    crate::merchant::credit_merchant_balance_for_token(
+        env,
+        &sub.merchant,
+        &sub.token,
+        usage_amount,
+    )?;
 
     if sub.prepaid_balance == 0 {
         validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
@@ -271,7 +360,6 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         sub.status = SubscriptionStatus::Cancelled;
 
         if let Some(cap) = sub.lifetime_cap {
-            let now = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
                 LifetimeCapReachedEvent {
@@ -284,15 +372,30 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         }
     }
 
-    env.storage().instance().set(&subscription_id, &sub);
+    storage.set(&subscription_id, &sub);
+    storage.set(&ref_key, &reference);
+
     append_statement(
         env,
         subscription_id,
         usage_amount,
         sub.merchant.clone(),
         BillingChargeKind::Usage,
-        env.ledger().timestamp(),
-        env.ledger().timestamp(),
+        now,
+        now,
     );
+
+    env.events().publish(
+        (Symbol::new(env, "usage_statement"), subscription_id),
+        UsageStatementEvent {
+            subscription_id,
+            merchant: sub.merchant.clone(),
+            usage_amount,
+            token: sub.token.clone(),
+            timestamp: now,
+            reference,
+        },
+    );
+
     Ok(())
 }

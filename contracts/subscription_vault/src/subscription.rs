@@ -23,7 +23,7 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    Subscription, SubscriptionMigratedEvent, SubscriptionStatus,
+    Subscription, SubscriptionMigratedEvent, SubscriptionStatus, UsageLimits, UsageState,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -857,4 +857,43 @@ pub fn get_subscriber_exposure(
     token: Address,
 ) -> Result<i128, Error> {
     compute_subscriber_exposure(env, &subscriber, &token)
+}
+
+pub fn do_configure_usage_limits(
+    env: &Env,
+    merchant: Address,
+    subscription_id: u32,
+    rate_limit_max_calls: Option<u32>,
+    rate_window_secs: u64,
+    burst_min_interval_secs: u64,
+    usage_cap_units: Option<i128>,
+) -> Result<(), Error> {
+    merchant.require_auth();
+
+    let sub = get_subscription(env, subscription_id)?;
+    if sub.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+    if !sub.usage_enabled {
+        return Err(Error::UsageNotEnabled);
+    }
+
+    if let Some(cap) = usage_cap_units {
+        if cap <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+    }
+
+    let limits = UsageLimits {
+        rate_limit_max_calls,
+        rate_window_secs,
+        burst_min_interval_secs,
+        usage_cap_units,
+    };
+
+    env.storage()
+        .instance()
+        .set(&DataKey::UsageLimits(subscription_id), &limits);
+
+    Ok(())
 }

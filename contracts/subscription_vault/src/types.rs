@@ -39,6 +39,9 @@ pub enum DataKey {
     BillingStatement(u32, u32),
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
+    UsageLimits(u32),
+    UsageState(u32),
+    UsageReference(u32),
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -226,6 +229,12 @@ pub enum Error {
     MaxConcurrentSubscriptionsReached = 1031,
     /// Subscriber's configured credit limit would be exceeded.
     CreditLimitExceeded = 1032,
+    /// Usage rate limit exceeded for the current window.
+    RateLimitExceeded = 1033,
+    /// Usage charge would exceed the per-period cap.
+    UsageCapExceeded = 1034,
+    /// Usage charge attempted too soon after previous charge (burst protection).
+    BurstLimitExceeded = 1035,
 }
 
 impl Error {
@@ -266,6 +275,9 @@ impl Error {
             Error::SubscriptionLimitReached => 429,
             Error::MaxConcurrentSubscriptionsReached => 1031,
             Error::CreditLimitExceeded => 1032,
+            Error::RateLimitExceeded => 1033,
+            Error::UsageCapExceeded => 1034,
+            Error::BurstLimitExceeded => 1035,
         }
     }
 }
@@ -677,6 +689,37 @@ pub struct SubscriptionMigratedEvent {
     pub subscriber: Address,
     /// Timestamp when the migration occurred.
     pub timestamp: u64,
+}
+
+/// Event emitted when a usage statement is logged.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UsageStatementEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub usage_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+    pub reference: String,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageLimits {
+    pub rate_limit_max_calls: Option<u32>,
+    pub rate_window_secs: u64,
+    pub burst_min_interval_secs: u64,
+    pub usage_cap_units: Option<i128>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageState {
+    pub last_usage_timestamp: u64,
+    pub window_start_timestamp: u64,
+    pub window_call_count: u32,
+    pub current_period_usage_units: i128,
+    pub period_index: u64,
 }
 
 /// Event emitted when a partial refund is processed for a subscription.

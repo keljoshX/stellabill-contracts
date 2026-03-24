@@ -41,8 +41,8 @@ pub use types::{
     PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
     Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
-    SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
-    MAX_METADATA_VALUE_LENGTH,
+    SubscriptionStatus, SubscriptionSummary, UsageLimits, UsageState, UsageStatementEvent,
+    MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH, MAX_METADATA_VALUE_LENGTH,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -634,7 +634,46 @@ impl SubscriptionVault {
     /// **This function is disabled when the emergency stop is active.**
     pub fn charge_usage(env: Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
         require_not_emergency_stop(&env)?;
-        charge_core::charge_usage_one(&env, subscription_id, usage_amount)
+        charge_core::charge_usage_one(
+            &env,
+            subscription_id,
+            usage_amount,
+            String::from_str(&env, "usage"),
+        )
+    }
+
+    /// Charge a metered usage amount against the subscription's prepaid balance with a reference.
+    ///
+    /// **This function is disabled when the emergency stop is active.**
+    pub fn charge_usage_with_reference(
+        env: Env,
+        subscription_id: u32,
+        usage_amount: i128,
+        reference: String,
+    ) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
+        charge_core::charge_usage_one(&env, subscription_id, usage_amount, reference)
+    }
+
+    /// Configure usage rate limits and caps for a subscription. Merchant only.
+    pub fn configure_usage_limits(
+        env: Env,
+        merchant: Address,
+        subscription_id: u32,
+        rate_limit_max_calls: Option<u32>,
+        rate_window_secs: u64,
+        burst_min_interval_secs: u64,
+        usage_cap_units: Option<i128>,
+    ) -> Result<(), Error> {
+        subscription::do_configure_usage_limits(
+            &env,
+            merchant,
+            subscription_id,
+            rate_limit_max_calls,
+            rate_window_secs,
+            burst_min_interval_secs,
+            usage_cap_units,
+        )
     }
 
     // ── Merchant ──────────────────────────────────────────────────────────────
@@ -947,3 +986,6 @@ impl SubscriptionVault {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod test_usage_limits;
