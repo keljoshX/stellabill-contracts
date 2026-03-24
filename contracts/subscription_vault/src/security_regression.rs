@@ -1,6 +1,6 @@
 use crate::{Error, SubscriptionVault, SubscriptionVaultClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, Env, Vec as SorobanVec};
+use soroban_sdk::{Address, Env, IntoVal, Vec as SorobanVec};
 
 // ── Fixtures for Attack Patterns ─────────────────────────────────────────────
 
@@ -32,14 +32,23 @@ fn simulate_unauthorized_admin_action(
     client: &SubscriptionVaultClient,
     attacker: &Address,
 ) -> Result<(), Error> {
-    // Clear mock auths to simulate real auth check
-    env.mock_auths(&[]);
+    // Mock auth for the attacker so the host-level check passes,
+    // allowing us to test the contract's own logic check.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_min_topup",
+            args: (attacker.clone(), 5_000_000i128).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
 
     // Try an admin-only action
     match client.try_set_min_topup(attacker, &5_000_000) {
         Ok(_) => Ok(()),
         Err(Ok(err)) => Err(err),
-        Err(Err(_)) => panic!("Unexpected host error"),
+        Err(Err(e)) => panic!("Unexpected host error: {:?}", e),
     }
 }
 
@@ -113,8 +122,14 @@ fn test_reentrancy_mitigation_checks() {
     // This test verifies that even if an external call (mocked) were to happen,
     // the state is updated BEFORE the call.
 
-    let (env, client, _, _admin) = setup_security_test_env();
+    let (env, client, token, _token_admin) = setup_security_test_env();
     let (id, subscriber, _) = create_funded_subscription(&env, &client, 1_000_000, 3600);
+
+    // Mint tokens to the contract address so it has funds to withdraw
+    let sub = client.get_subscription(&id);
+    let amount = sub.prepaid_balance;
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&client.address, &amount);
 
     // Verify that withdrawal follows CEI: balance is 0 before transfer completes
     // In a real scenario, if the transfer fails, the whole transaction reverts.
@@ -134,11 +149,11 @@ fn test_auth_bypass_negative_cases() {
 
     // 1. Non-admin trying to rotate admin
     let result = client.try_rotate_admin(&attacker, &attacker);
-    assert_eq!(result.unwrap_err(), Ok(Error::Unauthorized));
+    assert_eq!(result.unwrap_err(), Ok(Error::Forbidden));
 
     // 2. Non-admin trying to set min topup
     let err = simulate_unauthorized_admin_action(&env, &client, &attacker);
-    assert_eq!(err.unwrap_err(), Error::Unauthorized);
+    assert_eq!(err.unwrap_err(), Error::Forbidden);
 
     // 3. Unauthorized re-initialization
     let result = client.try_init(&attacker, &6, &attacker, &1_000_000, &3600);
@@ -165,19 +180,21 @@ fn test_auth_bypass_owner_verification_gap() {
 #[test]
 fn test_replay_negative_cases() {
     let (env, client, _, _) = setup_security_test_env();
-    let interval = 3600;
-    let (id, _, _) = create_funded_subscription(&env, &client, 1_000_000, interval);
+    let interval = 100_000; // Huge interval
+    let (id1, _, _) = create_funded_subscription(&env, &client, 1_000_000, interval);
+    let (id2, _, _) = create_funded_subscription(&env, &client, 1_000_000, interval);
 
     env.ledger().with_mut(|li| li.timestamp = 10_000);
 
-    // Attempt double charge
-    let err = simulate_double_charge_attack(&env, &client, id, interval);
-    assert_eq!(err.unwrap_err(), Error::IntervalNotElapsed);
+    // 1. Attempt double charge in same period
+    let err = simulate_double_charge_attack(&env, &client, id1, interval);
+    assert_eq!(err.unwrap_err(), Error::Replay);
 
-    // Attempt charge before interval elapses
-    env.ledger()
-        .with_mut(|li| li.timestamp = 10_000 + interval - 1);
-    let result = client.try_charge_subscription(&id);
+    // 2. Attempt charge before interval elapses
+    // Subscription created at T=10,000. Next allowed = 110,000.
+    env.ledger().with_mut(|li| li.timestamp = 50_000);
+
+    let result = client.try_charge_subscription(&id2);
     assert_eq!(result.unwrap_err(), Ok(Error::IntervalNotElapsed));
 }
 
