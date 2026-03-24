@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: ${{ github.event.inputs.toolchain || 'stable' }}
+          toolchain: ${{ github.event.inputs.toolchain != '' && github.event.inputs.toolchain || 'stable' }}
 
       - name: Add WASM target
         run: rustup target add wasm32-unknown-unknown
