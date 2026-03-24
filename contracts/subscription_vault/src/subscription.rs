@@ -372,6 +372,11 @@ pub fn do_pause_subscription(
     authorizer.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Paused)?;
     sub.status = SubscriptionStatus::Paused;
 
@@ -387,6 +392,11 @@ pub fn do_resume_subscription(
     authorizer.require_auth();
 
     let mut sub = get_subscription(env, subscription_id)?;
+
+    if authorizer != sub.subscriber && authorizer != sub.merchant {
+        return Err(Error::Forbidden);
+    }
+
     validate_status_transition(&sub.status, &SubscriptionStatus::Active)?;
     sub.status = SubscriptionStatus::Active;
 

@@ -947,3 +947,5 @@ impl SubscriptionVault {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod security_regression;

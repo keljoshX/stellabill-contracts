@@ -466,6 +466,19 @@ pub fn next_id(env: &Env) -> u32 {
 
 **Residual Risk**: Attacker can create unlimited subscriptions with valid signatures.
 
+## Consolidated Mitigations Table
+
+| Risk Class | Threat Case | Mitigation | Status | Regression Test |
+|------------|-------------|------------|--------|-----------------|
+| **Auth** | Unauthorized Charge | Admin address verification + `require_auth()` | Fixed | `test_auth_bypass_charge_subscription_non_admin` |
+| **Auth** | Unauthorized State Change | Subscriber/Merchant owner check + `require_auth()` | Fixed | `test_auth_bypass_owner_verification_gap` |
+| **Auth** | Re-initialization | `instance.has(admin)` check in `init()` | Fixed | `test_negative_reinitialization_attempt` |
+| **Replay** | Double Charging | Interval enforcement (`now >= last + interval`) | Fixed | `test_replay_protection_double_charge_blocked` |
+| **Replay** | Out-of-order Charge | Non-decrementing timestamps (Stellar runtime) | Fixed | `test_replay_negative_cases` |
+| **Arithmetic** | Deposit Overflow | Rust `checked_add` returns `Error::Overflow` | Fixed | `test_arithmetic_overflow_protection_deposit` |
+| **Arithmetic** | Charge Underflow | Rust `checked_sub` returns `Error::Underflow` | Fixed | `test_arithmetic_underflow_protection_charge` |
+| **Reentrancy** | Recursive Call | Checks-Effects-Interactions (CEI) + `ReentrancyGuard` | Mitigated | `test_reentrancy_mitigation_checks` |
+
 ---
 
 ## Authorization Model
@@ -474,40 +487,22 @@ pub fn next_id(env: &Env) -> u32 {
 
 | Operation | Required Auth | Verification |
 |-----------|---------------|--------------|
-| `init` | None | One-time initialization (no re-init check) |
+| `init` | None | One-time initialization check (`instance.has(admin)`) |
 | `create_subscription` | Subscriber | `subscriber.require_auth()` |
 | `deposit_funds` | Subscriber | `subscriber.require_auth()` |
 | `charge_subscription` | Admin | `admin.require_auth()` + address match |
 | `batch_charge` | Admin | `admin.require_auth()` + address match |
-| `cancel_subscription` | Authorizer | `authorizer.require_auth()` (no owner check) |
-| `pause_subscription` | Authorizer | `authorizer.require_auth()` (no owner check) |
-| `resume_subscription` | Authorizer | `authorizer.require_auth()` (no owner check) |
-| `withdraw_merchant_funds` | Merchant | `merchant.require_auth()` (not implemented) |
+| `cancel_subscription` | Subscriber/Merchant | `authorizer.require_auth()` + owner check |
+| `pause_subscription` | Subscriber/Merchant | `authorizer.require_auth()` + owner check |
+| `resume_subscription` | Subscriber/Merchant | `authorizer.require_auth()` + owner check |
+| `withdraw_merchant_funds` | Merchant | `merchant.require_auth()` |
 | `set_min_topup` | Admin | `admin.require_auth()` + address match |
 
-### Authorization Gaps
+### Authorization Gaps (Resolved)
 
-1. **No Owner Verification**: `cancel_subscription`, `pause_subscription`, and `resume_subscription` accept any `authorizer` with valid signature. They do NOT verify that `authorizer` is the subscriber or merchant.
+1. **Owner Verification**: Previously, `pause_subscription` and `resume_subscription` did not verify that `authorizer` was the subscriber or merchant. This has been FIXED in `subscription.rs`.
 
-   **Impact**: Any address can pause/cancel/resume any subscription if they can provide a valid signature.
-
-   **Recommended Fix**:
-   ```rust
-   if authorizer != sub.subscriber && authorizer != sub.merchant {
-       return Err(Error::Unauthorized);
-   }
-   ```
-
-2. **No Re-initialization Protection**: `init` can be called multiple times, overwriting admin and token addresses.
-
-   **Impact**: Attacker can re-initialize contract to become admin.
-
-   **Recommended Fix**:
-   ```rust
-   if env.storage().instance().has(&Symbol::new(env, "admin")) {
-       return Err(Error::AlreadyInitialized);
-   }
-   ```
+2. **Re-initialization Protection**: `init` now correctly checks for existing admin/token in storage to prevent re-initialization.
 
 ---
 
@@ -622,27 +617,13 @@ pub fn next_id(env: &Env) -> u32 {
 
 ---
 
-### 2. No Owner Verification in State Changes
+### 2. No Owner Verification in State Changes (RESOLVED)
 
-**Risk**: Any address can pause/cancel/resume any subscription with valid signature.
+**Status**: FIXED. `cancel_subscription`, `pause_subscription`, and `resume_subscription` now verify that the `authorizer` is either the subscriber or the merchant.
 
-**Impact**: MEDIUM - Unauthorized state manipulation
+### 3. No Re-initialization Protection (RESOLVED)
 
-**Mitigation**: Add owner checks in `cancel_subscription`, `pause_subscription`, `resume_subscription`
-
-**Status**: Implementation gap (see [Authorization Gaps](#authorization-gaps))
-
----
-
-### 3. No Re-initialization Protection
-
-**Risk**: `init` can be called multiple times, overwriting admin and token addresses.
-
-**Impact**: CRITICAL - Complete contract takeover
-
-**Mitigation**: Add initialization flag check
-
-**Status**: Implementation gap (see [Authorization Gaps](#authorization-gaps))
+**Status**: FIXED. The `init` function now checks if the contract has already been initialized by checking for the presence of the `admin` or `token` keys in storage.
 
 ---
 
