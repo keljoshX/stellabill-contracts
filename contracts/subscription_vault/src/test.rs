@@ -2397,3 +2397,180 @@ fn test_create_subscription_with_unaccepted_token_fails() {
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
+
+// Added pagination correctness tests for billing statements
+
+#[test]
+fn test_offset_pagination_ordering_newest_first() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let sub_id = 1u32;
+
+    // append 5 statements
+    for i in 0..5u32 {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000 + i as i128,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Charge,
+            i as u64,
+            i as u64 + 10,
+        );
+    }
+
+    let page = crate::statements::get_statements_by_subscription_offset(
+        &env,
+        sub_id,
+        0,
+        5,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(page.statements.len(), 5);
+    // newest first => last appended first
+    assert!(page.statements.get(0).unwrap().amount > page.statements.get(4).unwrap().amount);
+}
+
+#[test]
+fn test_offset_pagination_ordering_oldest_first() {
+    let (env, _client, _token, _admin) = setup_test_env();
+    let sub_id = 2u32;
+
+    for i in 0..5u32 {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000 + i as i128,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Charge,
+            i as u64,
+            i as u64 + 10,
+        );
+    }
+
+    let page = crate::statements::get_statements_by_subscription_offset(
+        &env,
+        sub_id,
+        0,
+        5,
+        false,
+    )
+    .unwrap();
+
+    assert!(page.statements.get(0).unwrap().amount < page.statements.get(4).unwrap().amount);
+}
+
+#[test]
+fn test_cursor_pagination_continuity() {
+    let (env, _client, _token, _admin) = setup_test_env();
+    let sub_id = 3u32;
+
+    for i in 0..10u32 {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000 + i as i128,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Charge,
+            i as u64,
+            i as u64 + 10,
+        );
+    }
+
+    let first = crate::statements::get_statements_by_subscription_cursor(
+        &env,
+        sub_id,
+        None,
+        4,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(first.statements.len(), 4);
+    assert!(first.next_cursor.is_some());
+
+    let second = crate::statements::get_statements_by_subscription_cursor(
+        &env,
+        sub_id,
+        first.next_cursor,
+        4,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(second.statements.len(), 4);
+}
+
+#[test]
+fn test_cursor_termination() {
+    let (env, _client, _token, _admin) = setup_test_env();
+    let sub_id = 4u32;
+
+    for i in 0..3u32 {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000 + i as i128,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Charge,
+            i as u64,
+            i as u64 + 10,
+        );
+    }
+
+    let mut cursor = None;
+    let mut total_fetched = 0;
+
+    loop {
+        let page = crate::statements::get_statements_by_subscription_cursor(
+            &env,
+            sub_id,
+            cursor,
+            2,
+            true,
+        )
+        .unwrap();
+
+        total_fetched += page.statements.len();
+        if page.next_cursor.is_none() {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    assert_eq!(total_fetched, 3);
+}
+
+#[test]
+fn test_invalid_limit() {
+    let (env, _client, _token, _admin) = setup_test_env();
+    let sub_id = 5u32;
+
+    let result = crate::statements::get_statements_by_subscription_cursor(
+        &env,
+        sub_id,
+        None,
+        0,
+        true,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_empty_history() {
+    let (env, _client, _token, _admin) = setup_test_env();
+
+    let page = crate::statements::get_statements_by_subscription_cursor(
+        &env,
+        999,
+        None,
+        5,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(page.statements.len(), 0);
+    assert!(page.next_cursor.is_none());
+}
