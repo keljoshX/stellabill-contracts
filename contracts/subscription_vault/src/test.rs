@@ -766,7 +766,7 @@ fn test_min_topup_above_threshold() {
 
 #[test]
 fn test_deposit_funds_basic() {
-    let (env, client, _token, _) = setup_test_env();
+    let (env, client, token, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
 
@@ -816,7 +816,7 @@ fn test_rotate_admin() {
 
 #[test]
 fn test_emergency_stop() {
-    let (env, client, _, admin) = setup_test_env();
+    let (_env, client, _, admin) = setup_test_env();
     assert!(!client.get_emergency_stop_status());
     client.enable_emergency_stop(&admin);
     assert!(client.get_emergency_stop_status());
@@ -845,7 +845,7 @@ fn test_create_subscription_blocked_by_emergency_stop() {
 
 #[test]
 fn test_batch_charge() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id1, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
@@ -1733,8 +1733,8 @@ fn test_export_contract_snapshot() {
 
 #[test]
 fn test_export_subscription_summaries() {
-    let (_env, client, _, admin) = setup_test_env();
-    let (id, _, _) = create_test_subscription(&_env, &client, SubscriptionStatus::Active);
+    let (env, client, _, admin) = setup_test_env();
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     let summaries = client.export_subscription_summaries(&admin, &0, &10);
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries.get(0).unwrap().subscription_id, id);

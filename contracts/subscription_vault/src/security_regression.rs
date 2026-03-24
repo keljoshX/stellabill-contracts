@@ -45,7 +45,7 @@ fn simulate_unauthorized_admin_action(
 
 /// Fixture for an "Arithmetic Overflow" attack on deposits.
 fn simulate_deposit_overflow_attack(
-    env: &Env,
+    _env: &Env,
     client: &SubscriptionVaultClient,
     id: u32,
     subscriber: &Address,
@@ -113,7 +113,7 @@ fn test_reentrancy_mitigation_checks() {
     // This test verifies that even if an external call (mocked) were to happen,
     // the state is updated BEFORE the call.
 
-    let (_env, client, _, _admin) = setup_security_test_env();
+    let (env, client, _, _admin) = setup_security_test_env();
     let (id, subscriber, _) = create_funded_subscription(&env, &client, 1_000_000, 3600);
 
     // Verify that withdrawal follows CEI: balance is 0 before transfer completes
