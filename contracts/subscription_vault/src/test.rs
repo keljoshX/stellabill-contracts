@@ -3,7 +3,7 @@ use crate::{
     Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault,
     SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
@@ -552,7 +552,7 @@ fn test_subscription_struct_with_lifetime_cap() {
 
 #[test]
 fn test_charge_subscription_basic() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
@@ -766,7 +766,7 @@ fn test_min_topup_above_threshold() {
 
 #[test]
 fn test_deposit_funds_basic() {
-    let (env, client, token, _) = setup_test_env();
+    let (env, client, _token, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
 
@@ -789,7 +789,7 @@ fn test_deposit_funds_basic() {
 #[test]
 #[should_panic(expected = "Error(Contract, #402)")]
 fn test_deposit_funds_below_minimum() {
-    let (env, client, token, _) = setup_test_env();
+    let (env, client, _token, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     let id = client.create_subscription(
@@ -866,7 +866,7 @@ fn test_batch_charge() {
 
 #[test]
 fn test_next_charge_info() {
-    let (env, client, _, _) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     let info = client.get_next_charge_info(&id);
@@ -1725,7 +1725,7 @@ fn test_withdraw_subscriber_funds_after_cancel() {
 
 #[test]
 fn test_export_contract_snapshot() {
-    let (env, client, _, admin) = setup_test_env();
+    let (_env, client, _, admin) = setup_test_env();
     let snapshot = client.export_contract_snapshot(&admin);
     assert_eq!(snapshot.admin, admin);
     assert_eq!(snapshot.storage_version, 2);
@@ -1733,8 +1733,8 @@ fn test_export_contract_snapshot() {
 
 #[test]
 fn test_export_subscription_summaries() {
-    let (env, client, _, admin) = setup_test_env();
-    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+    let (_env, client, _, admin) = setup_test_env();
+    let (id, _, _) = create_test_subscription(&_env, &client, SubscriptionStatus::Active);
     let summaries = client.export_subscription_summaries(&admin, &0, &10);
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries.get(0).unwrap().subscription_id, id);
@@ -2061,7 +2061,7 @@ fn test_metadata_delete_frees_key_slot() {
 
 #[test]
 fn test_metadata_isolation_between_subscriptions() {
-    let (env, client, _, _) = setup_test_env();
+    let (env, client, _, _admin) = setup_test_env();
     let (id1, sub1, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     let (id2, sub2, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
 

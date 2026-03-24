@@ -1,6 +1,6 @@
-use crate::{Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
+use crate::{Error, SubscriptionVault, SubscriptionVaultClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, Env, Symbol, Vec as SorobanVec};
+use soroban_sdk::{Address, Env, Vec as SorobanVec};
 
 // ── Fixtures for Attack Patterns ─────────────────────────────────────────────
 
@@ -19,10 +19,11 @@ fn simulate_double_charge_attack(
     client.charge_subscription(&id);
 
     // Immediate second charge (should fail via IntervalNotElapsed or Replay)
-    client.try_charge_subscription(&id).map_err(|e| match e {
-        Ok(err) => err,
-        Err(_) => panic!("Unexpected error type"),
-    })
+    match client.try_charge_subscription(&id) {
+        Ok(_) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        Err(Err(_)) => panic!("Unexpected host error"),
+    }
 }
 
 /// Fixture for an "Unauthorized Admin Action" attack attempt.
@@ -35,12 +36,11 @@ fn simulate_unauthorized_admin_action(
     env.mock_auths(&[]);
 
     // Try an admin-only action
-    client
-        .try_set_min_topup(attacker, &5_000_000)
-        .map_err(|e| match e {
-            Ok(err) => err,
-            Err(_) => panic!("Unexpected error type"),
-        })
+    match client.try_set_min_topup(attacker, &5_000_000) {
+        Ok(_) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        Err(Err(_)) => panic!("Unexpected host error"),
+    }
 }
 
 /// Fixture for an "Arithmetic Overflow" attack on deposits.
@@ -53,12 +53,11 @@ fn simulate_deposit_overflow_attack(
     let sub = client.get_subscription(&id);
     let overflow_amount = i128::MAX - sub.prepaid_balance + 1;
 
-    client
-        .try_deposit_funds(&id, subscriber, &overflow_amount)
-        .map_err(|e| match e {
-            Ok(err) => err,
-            Err(_) => panic!("Unexpected error type"),
-        })
+    match client.try_deposit_funds(&id, subscriber, &overflow_amount) {
+        Ok(_) => Ok(()),
+        Err(Ok(err)) => Err(err),
+        Err(Err(_)) => panic!("Unexpected host error"),
+    }
 }
 
 // -- helpers ------------------------------------------------------------------
@@ -114,7 +113,7 @@ fn test_reentrancy_mitigation_checks() {
     // This test verifies that even if an external call (mocked) were to happen,
     // the state is updated BEFORE the call.
 
-    let (env, client, _, _) = setup_security_test_env();
+    let (_env, client, _, _admin) = setup_security_test_env();
     let (id, subscriber, _) = create_funded_subscription(&env, &client, 1_000_000, 3600);
 
     // Verify that withdrawal follows CEI: balance is 0 before transfer completes
@@ -130,7 +129,7 @@ fn test_reentrancy_mitigation_checks() {
 
 #[test]
 fn test_auth_bypass_negative_cases() {
-    let (env, client, _, admin) = setup_security_test_env();
+    let (env, client, _, _admin) = setup_security_test_env();
     let attacker = Address::generate(&env);
 
     // 1. Non-admin trying to rotate admin
@@ -230,7 +229,7 @@ fn test_state_machine_illegal_transitions() {
 fn test_negative_batch_charge_with_unauthorized_admin() {
     let (env, client, _, _) = setup_security_test_env();
     let (id1, _, _) = create_funded_subscription(&env, &client, 1_000_000, 3600);
-    let attacker = Address::generate(&env);
+    let _attacker = Address::generate(&env);
 
     env.mock_auths(&[]); // Simulate no valid auth
 
