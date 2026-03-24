@@ -20,12 +20,21 @@ pub fn set_oracle_config(
     }
     #[cfg(feature = "oracle-pricing")]
     {
-        if enabled && oracle.is_none() {
-            return Err(Error::OracleNotConfigured);
+        if enabled {
+            if oracle.is_none() {
+                return Err(Error::OracleNotConfigured);
+            }
+            if max_age_seconds == 0 {
+                return Err(Error::InvalidInput);
+            }
         }
         let storage = env.storage().instance();
         storage.set(&Symbol::new(env, KEY_ORACLE_ENABLED), &enabled);
-        storage.set(&Symbol::new(env, KEY_ORACLE_ADDR), &oracle);
+        if let Some(ref addr) = oracle {
+            storage.set(&Symbol::new(env, KEY_ORACLE_ADDR), addr);
+        } else {
+            storage.remove(&Symbol::new(env, KEY_ORACLE_ADDR));
+        }
         storage.set(&Symbol::new(env, KEY_ORACLE_MAX_AGE), &max_age_seconds);
         Ok(())
     }
@@ -48,7 +57,7 @@ pub fn get_oracle_config(env: &Env) -> OracleConfig {
             enabled: storage
                 .get(&Symbol::new(env, KEY_ORACLE_ENABLED))
                 .unwrap_or(false),
-            oracle: storage.get(&Symbol::new(env, KEY_ORACLE_ADDR)),
+            oracle: storage.get::<_, Address>(&Symbol::new(env, KEY_ORACLE_ADDR)),
             max_age_seconds: storage
                 .get(&Symbol::new(env, KEY_ORACLE_MAX_AGE))
                 .unwrap_or(0u64),
