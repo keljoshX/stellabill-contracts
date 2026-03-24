@@ -2397,3 +2397,32 @@ fn test_create_subscription_with_unaccepted_token_fails() {
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
+
+#[test]
+fn test_id_exhaustion_persistence() {
+    let (env, client, _token, _admin) = setup_test_env();
+    env.mock_all_auths();
+
+    // 1. Manually set next_id to the absolute limit
+    let key = Symbol::new(&env, "next_id");
+    env.storage()
+        .instance()
+        .set(&key, &crate::MAX_SUBSCRIPTION_ID);
+
+    // 2. Attempt creation multiple times
+    for _ in 0..10 {
+        let res = client.try_create_subscription(
+            &Address::generate(&env),
+            &Address::generate(&env),
+            &100,
+            &60,
+            &false,
+            &None,
+        );
+        assert_eq!(res, Err(Ok(crate::types::Error::SubscriptionLimitReached)));
+    }
+
+    // 3. Prove the ID hasn't wrapped around to 0 or 1
+    let final_id: u32 = env.storage().instance().get(&key).unwrap();
+    assert_eq!(final_id, crate::MAX_SUBSCRIPTION_ID);
+}

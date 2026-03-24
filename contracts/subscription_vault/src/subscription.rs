@@ -27,15 +27,6 @@ use crate::types::{
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
-#[allow(dead_code)]
-pub fn next_id(env: &Env) -> u32 {
-    let key = Symbol::new(env, "next_id");
-    let storage = env.storage().instance();
-    let id: u32 = storage.get(&key).unwrap_or(0);
-    storage.set(&key, &(id + 1));
-    id
-}
-
 pub fn next_plan_id(env: &Env) -> u32 {
     let key = Symbol::new(env, "next_plan_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
@@ -620,9 +611,8 @@ pub fn do_create_subscription_from_plan(
     // Enforce per-plan concurrency limit for this subscriber/plan pair.
     enforce_plan_concurrency_limit(env, &subscriber, plan_template_id)?;
 
-    let key = Symbol::new(env, "next_id");
-    let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
-    env.storage().instance().set(&key, &(id + 1));
+    // Hardened ID allocation helper call
+    let id = next_id(env)?;
 
     let sub = Subscription {
         subscriber: subscriber.clone(),
@@ -640,7 +630,7 @@ pub fn do_create_subscription_from_plan(
 
     env.storage().instance().set(&id, &sub);
 
-    // Persist linkage between subscription and the plan template it was created from.
+    // Persist linkage between subscription and the plan template
     let sub_plan_storage_key = sub_plan_key(env, id);
     env.storage()
         .instance()
@@ -857,4 +847,18 @@ pub fn get_subscriber_exposure(
     token: Address,
 ) -> Result<i128, Error> {
     compute_subscriber_exposure(env, &subscriber, &token)
+}
+
+pub fn next_id(env: &Env) -> Result<u32, Error> {
+    let key = Symbol::new(env, "next_id");
+    let storage = env.storage().instance();
+    let id: u32 = storage.get(&key).unwrap_or(0);
+
+    // Saturation check
+    if id >= crate::MAX_SUBSCRIPTION_ID {
+        return Err(Error::SubscriptionLimitReached);
+    }
+
+    storage.set(&key, &(id + 1));
+    Ok(id)
 }
