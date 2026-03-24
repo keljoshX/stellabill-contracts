@@ -2,34 +2,19 @@
 
 ## Overview
 
-This document describes the security assumptions, threat model, and mitigations for the Stellabill Subscription Vault smart contract. The contract manages prepaid USDC subscriptions on the Stellar network using Soroban, handling recurring billing between subscribers and merchants.
+This document consolidates the overarching security assumptions, threat models, and corresponding mitigations for the Stellabill Subscription Vault smart contract on the Soroban network. It aggregates the deep-dives found in `docs/reentrancy.md`, `docs/replay_protection.md`, and `docs/safe_math.md` into a single, concise threat matrix mapping directly to contract functions and tests.
 
-**Contract Version**: Early development (as of repository state)  
-**Platform**: Soroban (Stellar smart contracts)  
-**Primary Asset**: USDC tokens held in subscription prepaid balances  
-**Last Updated**: 2026-02-22
+**Primary Asset**: USDC in prepaid subscription balances  
+**Last Updated**: 2026-03-23
 
 ---
 
-## Table of Contents
-
-1. [Trust Model](#trust-model)
-2. [Asset Inventory](#asset-inventory)
-3. [Threat Actors](#threat-actors)
-4. [Attack Vectors and Mitigations](#attack-vectors-and-mitigations)
-5. [Authorization Model](#authorization-model)
-6. [State Machine Security](#state-machine-security)
-7. [Arithmetic and Overflow Protection](#arithmetic-and-overflow-protection)
-8. [Timing and Replay Protection](#timing-and-replay-protection)
-9. [Known Limitations](#known-limitations)
-10. [Security Testing](#security-testing)
-11. [Incident Response](#incident-response)
-
----
-
-## Trust Model
+## 1. Threat Model Assumptions
 
 ### Trusted Actors
+- **Admin**: Operates with High trust. Responsible for charging subscriptions and setting parameters (e.g., `min_topup`). Represents a single point of failure.
+- **Soroban Runtime**: Trusted to securely execute WebAssembly, enforce authentication (`require_auth()`), and manage state natively.
+- **USDC Token Contract**: Trusted to implement the Stellar Asset Contract (SAC) correctly without malicious arbitrary callbacks.
 
 | Actor | Trust Level | Capabilities | Constraints |
 |-------|-------------|--------------|-------------|
@@ -636,155 +621,49 @@ pub fn next_id(env: &Env) -> u32 {
 **Mitigation**: Implement token transfers using Stellar Asset Contract (SAC) interface
 
 **Status**: Planned feature (marked as TODO in code)
+### Semi & Untrusted Actors
+- **Subscribers (Semi-Trusted)**: Can deposit funds and manage their own subscriptions but might attempt state manipulations to avoid charges.
+- **Merchants (Semi-Trusted)**: Can withdraw earned balances but might attempt to over-withdraw or exploit cross-subscription data.
+- **External Attackers (Untrusted)**: May probe the contract for reentrancy, overflow, or state-bypass vulnerabilities.
 
 ---
 
-### 5. No Batch Size Limit
+## 2. Threat Categories & Mitigation Mapping
 
-**Risk**: Extremely large batch charges could hit gas limits or cause DoS.
-
-**Impact**: LOW - Admin-only operation, self-inflicted DoS
-
-**Mitigation**: Add maximum batch size constant (e.g., 100 subscriptions per batch)
-
-**Status**: Optimization opportunity
-
----
-
-### 6. No Storage Limits
-
-**Risk**: Unlimited subscription creation could exhaust contract storage.
-
-**Impact**: MEDIUM - DoS via storage exhaustion
-
-**Mitigation**: Add per-subscriber limits, require minimum deposit, implement archival
-
-**Status**: Unmitigated (see [Storage Exhaustion](#10-storage-exhaustion-dos))
+| Threat Category | Implemented Mitigations | Associated Functions | Test Coverage Verification |
+|-----------------|-------------------------|----------------------|----------------------------|
+| **Unauthorized Access** | All state changes require Soroban `require_auth()` signature verification. Operational roles (Admin, Subscriber, Merchant) are explicitly validated. | `charge_subscription`, `batch_charge`, `deposit_funds`, `cancel_subscription` | `test_charge_subscription_unauthorized`, `test_cancel_subscription_unauthorized`, `test_set_min_topup_unauthorized` |
+| **Reentrancy (Callbacks)** | Strict adherence to the **Checks-Effects-Interactions (CEI)** pattern. Internal balances are updated in storage *before* any `token.transfer()` occurs. Optional runtime locks (`reentrancy.rs`) are available. | `do_deposit_funds`, `withdraw_merchant_funds`, `do_withdraw_subscriber_funds` | `test_deposit_funds_state_committed_before_transfer`, `test_withdraw_merchant_funds_state_committed_before_transfer` |
+| **Replay & Double Charging** | Period-based tracking (`now >= last_payment_timestamp + interval_seconds`) ensures single deduction per interval. Deduplication relies on `idempotency_key` handling for retries without double-debits (`Error::Replay`). | `charge_subscription`, `batch_charge` | `test_charge_succeeds_at_exact_interval`, `test_immediate_retry_at_same_timestamp_rejected` |
+| **Arithmetic Over/Underflow**| Explicit use of Rust's checked arithmetic wrappers (`safe_add`, `safe_sub`) returning explicit `Error::Overflow` (500) and `Error::Underflow` (501). Prevents any silent wraparound or negative balances. | `safe_add_balance`, `safe_sub_balance`, `charge_one` | Comprehensive safe math unit tests validating panic edges implicitly. |
+| **State Machine Bypass** | Centralized validation via `validate_status_transition`. Subscriptions locked once `Cancelled`. Illegal state jumping (e.g., `InsufficientBalance` -> `Paused`) yields `Error::InvalidStatusTransition`. | `validate_status_transition`, `do_cancel_subscription` | `test_all_valid_transitions_coverage`, `test_invalid_cancelled_to_active`, `test_validate_cancelled_transitions_all_blocked` |
+| **Subscription ID Collision** | Monotonically increasing, atomic `next_id` counter bounded to `u32::MAX`. | `next_id`, `create_subscription` | `test_subscription_limit_reached` |
 
 ---
 
-### 7. No Emergency Stop
+## 3. Known Limitations and Future Hardening
 
-**Risk**: No way to pause contract in case of discovered vulnerability.
+While the current architecture rigorously applies the CEI pattern and strict arithmetic bounds, the following systemic risks represent known limitations slated for future mitigation:
 
-**Impact**: HIGH - Cannot respond to active exploits
-
-**Mitigation**: Add admin-controlled pause mechanism for critical operations
-
-**Status**: Recommended addition
-
----
-
-### 8. No Fund Recovery
-
-**Risk**: Funds sent to contract by mistake cannot be recovered.
-
-**Impact**: LOW - User error, not contract vulnerability
-
-**Mitigation**: Add admin function to recover accidentally sent tokens
-
-**Status**: Nice-to-have feature
-
----
-
-## Security Testing
-
-### Test Coverage
-
-**Current Coverage**: 95%+ (per project requirements)
-
-**Test Categories**:
-1. **State Machine**: 15+ tests covering all valid/invalid transitions
-2. **Authorization**: 4 tests for admin/unauthorized access
-3. **Interval Enforcement**: 6 tests for replay protection and timing
-4. **Arithmetic**: Implicit in all operations (overflow tests recommended)
-5. **Batch Operations**: 3 tests for batch charge scenarios
-6. **Edge Cases**: Minimum top-up, boundary conditions, idempotency
-
-### Test Files
-
-- `contracts/subscription_vault/src/test.rs`: Comprehensive unit tests
-- `contracts/subscription_vault/test_snapshots/`: Snapshot tests for state verification
-
-### Recommended Additional Tests
-
-1. **Overflow Tests**: Explicit tests for `i128::MAX` and `u64::MAX` edge cases
-2. **Reentrancy Tests**: When token transfers are implemented
-3. **Fuzz Testing**: Random inputs for state machine and arithmetic
-4. **Integration Tests**: Multi-contract scenarios with real token contract
-5. **Gas Limit Tests**: Maximum batch sizes and storage limits
-
----
-
-## Incident Response
-
-### Monitoring Recommendations
-
-1. **Admin Actions**: Log all `charge_subscription`, `batch_charge`, `set_min_topup` calls
-2. **Large Deposits**: Alert on deposits exceeding threshold (e.g., >$10,000)
-3. **Failed Charges**: Monitor `InsufficientBalance` transitions
-4. **State Anomalies**: Alert on unexpected state transitions
-5. **Batch Failures**: Monitor batch charge failure rates
-
-### Response Procedures
-
-1. **Suspected Exploit**:
-   - Identify affected subscriptions
-   - Pause contract if emergency stop is implemented
-   - Analyze transaction history
-   - Coordinate with Stellar validators if necessary
-
-2. **Admin Key Compromise**:
-   - Immediately rotate admin key (requires contract upgrade)
-   - Audit all admin actions since compromise
-   - Notify affected users
-   - Consider contract migration
-
-3. **Vulnerability Discovery**:
-   - Assess impact and exploitability
-   - Develop and test fix
-   - Deploy patched contract
-   - Migrate state if necessary
-   - Disclose responsibly after mitigation
-
-### Contact Information
-
-- **Security Issues**: [security@stellabill.example] (placeholder)
-- **Bug Bounty**: [To be established]
-- **Incident Response Team**: [To be established]
-
----
-
-## Audit History
-
-| Date | Auditor | Scope | Findings | Status |
-|------|---------|-------|----------|--------|
-| TBD | TBD | Full contract | TBD | Pending |
-
-**Note**: This contract has not yet undergone professional security audit. Use in production is NOT recommended until audited.
-
----
-
-## References
-
-1. **State Machine**: `docs/subscription_state_machine.md`
-2. **Batch Charging**: `docs/batch_charge.md`
-3. **Billing Intervals**: `docs/billing_intervals.md`
-4. **Top-Up Estimation**: `docs/topup_estimation.md`
-5. **Soroban Security**: https://developers.stellar.org/docs/smart-contracts/security
-6. **Stellar Protocol**: https://developers.stellar.org/docs/fundamentals-and-concepts
+1. **Admin Key Compromise**: 
+   - *Risk*: A compromised admin key can force global charges or manipulate thresholds continuously.
+   - *Future Hardening*: Transition to multi-signature structures or time-locked upgrades for critical controls.
+2. **Storage Exhaustion (DoS)**: 
+   - *Risk*: An attacker with valid signatures can spam `create_subscription` indefinitely, inflating ledger footprint arbitrarily.
+   - *Future Hardening*: Introduce minimal initial deposit requirements, per-subscriber creation limits, and archival functions.
+3. **Owner Verification Gap**: 
+   - *Risk*: Actions like `pause_subscription` accept an `authorizer` without rigorously asserting whether that authorizer strictly matches `sub.subscriber` or `sub.merchant`.
+   - *Future Hardening*: Patch state-changing endpoints with explicit owner cross-checks: `if authorizer != sub.subscriber && ... { return Err; }`.
+4. **No Initialization Lock (`init`)**:
+   - *Risk*: The vault initialization endpoint can be accidentally re-called, potentially overwriting admin references.
+   - *Future Hardening*: Wrap `init` logic with a check for presence of a stored initialization constant (`Error::AlreadyInitialized`).
 
 ---
 
 ## Document Maintenance
 
-This document should be updated when:
-- New features are added (e.g., token transfers, emergency stop)
-- Security vulnerabilities are discovered and fixed
-- Authorization model changes
-- State machine is modified
-- After security audits
-
-**Maintainer**: Security team / Lead developer  
-**Review Frequency**: Before each major release  
-**Version Control**: Track changes in git alongside contract code
+For deeper mechanics and mathematical constraints, review the underlying architecture documentation:
+- **`docs/reentrancy.md`**: Logic isolation, execution order (CEI constraints)
+- **`docs/replay_protection.md`**: Idempotency keys, clock skew resistance
+- **`docs/safe_math.md`**: Fixed-point bounds checking and token translation
+- **`docs/subscription_state_machine.md`**: Terminal transitions and automation hooks

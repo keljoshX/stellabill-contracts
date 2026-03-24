@@ -1,48 +1,52 @@
 # Batch Operation Tests Documentation
 
-This document describes the comprehensive test suite for batch charge operations in the Stellabill subscription vault contract, implemented as part of issue #45.
+This document describes the consistency-focused test suite for batch charge operations in the
+Stellabill subscription vault contract.
 
 ## Overview
 
-The batch charge functionality (`batch_charge`) allows the admin to process multiple subscription charges in a single transaction. The function continues processing all subscriptions even if some fail, returning a result for each subscription ID.
+The batch charge functionality (`batch_charge`) allows the admin to process multiple subscription
+charges in a single transaction. The function continues processing all subscriptions even if some
+fail, returning a result for each subscription ID.
+
+The primary guarantee covered by these tests is that `batch_charge` behaves exactly like applying
+`charge_subscription` sequentially to the same input list at the same ledger timestamp.
 
 ## Test Coverage Summary
 
-### Test Groups Added: 5 categories, 30 total tests
+### Test Groups Added
 
-1. **Batch Size Variations (4 tests)** - Empty, single, small (5), medium (20), large (50)
-2. **Partial Success Semantics (7 tests)** - Mixed outcomes with all error types
-3. **State Correctness (4 tests)** - Verify state updates after operations
-4. **Authorization & Security (1 test)** - Admin-only access enforcement
-5. **Edge Cases (5 tests)** - Duplicates, exact balance, boundaries
+1. **Single-vs-Batch Equivalence** - Successful batch charges match repeated single charges
+2. **Mixed Outcome Consistency** - Valid, invalid, duplicate, and missing IDs preserve order and codes
+3. **Failed Item Isolation** - Failed items produce no extra side effects beyond single-call semantics
+4. **High-Volume Lists** - Larger input lists remain deterministic and ledger-correct
 
 ## Key Findings
 
-- ✅ Performance scales linearly (50 subscriptions ~50ms)
-- ✅ Partial failures don't affect other subscriptions in batch
-- ✅ All error types properly handled and reported
-- ✅ State remains consistent across multiple batch rounds
-- ✅ Result indices match input order exactly
+- ✅ Batch output matches sequential single-call semantics for identical inputs
+- ✅ Partial failures don't introduce extra side effects beyond the single path
+- ✅ Error codes remain stable and ordered index-for-index with the input list
+- ✅ Duplicate IDs behave like repeated single charges at the same timestamp
+- ✅ Ledger state and merchant balances stay consistent for high-volume inputs
 
 ## Test Statistics
 
-- **Total tests:** 30
-- **Error types covered:** 4 (NotFound, InsufficientBalance, NotActive, IntervalNotElapsed)
-- **Batch sizes tested:** 0, 1, 5, 20, 50
-- **Code coverage:** >95% for batch operations
-- **Execution time:** <2 seconds for all tests
+- **Error types covered:** `NotFound`, `InsufficientBalance`, `NotActive`, `Replay`
+- **Batch sizes tested:** Small deterministic lists and high-volume lists with duplicates
+- **Execution time:** Full test suite remains under a few seconds locally
 
 ## Behaviors Validated
 
-### Partial Success
-- Batch processing continues even when individual charges fail
-- Each subscription gets independent result
-- No cross-contamination between successes/failures
+### Batch-vs-Single Consistency
+- `batch_charge` returns the same success/error pattern as repeated `charge_subscription` calls
+- Result ordering matches the input list exactly
+- Duplicate IDs observe prior successful items exactly as they would on sequential single calls
 
-### State Correctness
-- Successful charges: deduct amount, update timestamp
-- Failed charges: leave all state unchanged
-- Multiple rounds maintain cumulative state
+### Ledger Correctness
+- Successful charges deduct prepaid balance, update timestamps, and credit merchant balances
+- Failed charges may still apply the same documented single-call state transitions
+  such as grace-period movement on insufficient balance
+- Batch processing must not introduce any extra state mutations beyond those single-call effects
 
 ### Error Handling
 - InsufficientBalance (1003): Not enough prepaid balance
@@ -51,21 +55,20 @@ The batch charge functionality (`batch_charge`) allows the admin to process mult
 - NotFound (404): Invalid subscription ID
 
 ### Edge Cases
-- Duplicate IDs: First succeeds, duplicates fail with IntervalNotElapsed
-- Exact balance: Charge succeeds, balance becomes 0
-- Off-by-one: Fails if even 1 stroops short
-- Result ordering: Output matches input index-for-index
+- Mixed valid and invalid IDs
+- Duplicate IDs in one batch
+- Missing subscription IDs
+- High-volume input lists with alternating success/failure states
 
 ## Usage Recommendations
 
-1. **Optimal batch size:** 20-50 subscriptions per call
-2. **Error handling:** Always check result.success for each subscription
-3. **Retry logic:** Re-batch failed subscriptions after fixing issues
-4. **Monitoring:** Track success rate per batch
+1. **Treat results positionally:** Each result belongs to the input ID at the same index.
+2. **Retry selectively:** Only retry failed entries after fixing their root cause.
+3. **Expect duplicate sensitivity:** Duplicate IDs later in the same list may fail because earlier entries already mutated state.
+4. **Audit failed items through single semantics:** If a failed batch item changes state, it should match what a direct single charge would have done.
 
 ## Conclusion
 
-✅ Comprehensive test coverage achieved
-✅ All tests passing and deterministic
-✅ >95% code coverage requirement met
-✅ Issue #45 requirements fulfilled
+✅ Batch charge behavior is proven consistent with sequential single-charge semantics
+✅ Ordering, error-code stability, and failed-item isolation are covered
+✅ High-volume deterministic behavior is documented and tested
