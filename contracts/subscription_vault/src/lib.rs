@@ -24,6 +24,7 @@ mod state_machine;
 mod statements;
 mod subscription;
 mod types;
+pub mod migration;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
