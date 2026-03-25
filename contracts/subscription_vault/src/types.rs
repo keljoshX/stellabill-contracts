@@ -685,6 +685,22 @@ pub struct PlanTemplateUpdatedEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when a plan's max-active-subscriptions limit is configured.
+///
+/// A `max_active` value of `0` means "no limit enforced".
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PlanMaxActiveUpdatedEvent {
+    /// Plan template whose limit was changed.
+    pub plan_template_id: u32,
+    /// Merchant that owns the plan and authorized the change.
+    pub merchant: Address,
+    /// New limit value (`0` = unlimited).
+    pub max_active: u32,
+    /// Ledger timestamp when the change was applied.
+    pub timestamp: u64,
+}
+
 /// Event emitted when a subscription is migrated from one plan template
 /// version to another.
 #[contracttype]

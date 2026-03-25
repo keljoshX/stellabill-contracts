@@ -116,6 +116,15 @@ pub fn get_cap_info(env: &Env, subscription_id: u32) -> Result<CapInfo, Error> {
     })
 }
 
+/// Returns the configured max-active-subscriptions limit for a plan template.
+///
+/// A return value of `0` means no limit is enforced for that plan.
+/// The plan must exist; returns `0` if no limit has been explicitly set.
+pub fn get_plan_max_active_subs(env: &Env, plan_template_id: u32) -> u32 {
+    let key = (Symbol::new(env, "plan_max_active"), plan_template_id);
+    env.storage().instance().get(&key).unwrap_or(0)
+}
+
 /// Result of a paginated query for subscriptions by subscriber.
 #[contracttype]
 #[derive(Clone, Debug)]

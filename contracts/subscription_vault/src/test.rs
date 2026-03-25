@@ -3,7 +3,7 @@ use crate::{
     AdminRotatedEvent, Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
     SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
@@ -4306,3 +4306,461 @@ fn test_get_oracle_config_default_is_disabled() {
     assert!(cfg.oracle.is_none());
     assert_eq!(cfg.max_age_seconds, 0u64);
 }
+
+// ── Plan Max-Active Subscription Limit Tests ──────────────────────────────────
+//
+// Covers: set_plan_max_active_subs, get_plan_max_active_subs,
+//         create_subscription_from_plan enforcement, concurrency edge cases,
+//         counting rules for paused/cancelled, limit updates after existing subs.
+
+/// Helper: create a plan template and return (plan_id, merchant).
+fn setup_plan(
+    env: &Env,
+    client: &SubscriptionVaultClient,
+) -> (u32, Address) {
+    let merchant = Address::generate(env);
+    let plan_id = client
+        .create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    (plan_id, merchant)
+}
+
+// ── Default / zero semantics ──────────────────────────────────────────────────
+
+#[test]
+fn test_plan_max_active_default_is_zero() {
+    // Before set_plan_max_active_subs is ever called the limit must be 0 (unlimited).
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, _) = setup_plan(&env, &client);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 0);
+}
+
+#[test]
+fn test_plan_max_active_zero_allows_unlimited_subscriptions() {
+    // max_active == 0 → no cap; multiple subscribers can each create many subs.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, _) = setup_plan(&env, &client);
+    // limit stays at 0 (default)
+
+    for _ in 0..5 {
+        let subscriber = Address::generate(&env);
+        assert!(client
+            .try_create_subscription_from_plan(&subscriber, &plan_id)
+            .is_ok());
+    }
+}
+
+// ── set / get round-trip ──────────────────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_plan_max_active_subs() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+
+    client.set_plan_max_active_subs(&merchant, &plan_id, &3);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 3);
+}
+
+#[test]
+fn test_set_plan_max_active_subs_can_be_updated() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 2);
+
+    // Raise the limit.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &5);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 5);
+
+    // Lower back to 1.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 1);
+}
+
+#[test]
+fn test_set_plan_max_active_subs_to_zero_removes_limit() {
+    // Setting back to 0 after a non-zero value re-enables unlimited creation.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // At limit — second creation must fail.
+    let subscriber2 = Address::generate(&env);
+    let result = client.try_create_subscription_from_plan(&subscriber, &plan_id);
+    assert_eq!(result, Err(Ok(Error::MaxConcurrentSubscriptionsReached)));
+
+    // Remove the limit.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &0);
+
+    // Now creation succeeds again for the same subscriber.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber, &plan_id)
+        .is_ok());
+    // And for a fresh subscriber too.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber2, &plan_id)
+        .is_ok());
+}
+
+#[test]
+fn test_set_plan_max_active_subs_emits_event() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+    assert!(
+        !env.events().all().is_empty(),
+        "set_plan_max_active_subs must emit at least one event"
+    );
+}
+
+// ── Authorization ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_set_plan_max_active_subs_non_owner_rejected() {
+    // A different merchant must not be able to configure another merchant's plan.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, _owner) = setup_plan(&env, &client);
+    let attacker = Address::generate(&env);
+
+    let result = client.try_set_plan_max_active_subs(&attacker, &plan_id, &1);
+    assert_eq!(result, Err(Ok(Error::Forbidden)));
+}
+
+#[test]
+fn test_set_plan_max_active_subs_nonexistent_plan_rejected() {
+    let (env, client, _, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+
+    let result = client.try_set_plan_max_active_subs(&merchant, &9999, &1);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
+
+// ── Enforcement at creation time ──────────────────────────────────────────────
+
+#[test]
+fn test_create_from_plan_blocked_at_limit() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    let result = client.try_create_subscription_from_plan(&subscriber, &plan_id);
+    assert_eq!(result, Err(Ok(Error::MaxConcurrentSubscriptionsReached)));
+}
+
+#[test]
+fn test_create_from_plan_limit_is_per_subscriber() {
+    // Each subscriber has their own independent counter against the plan limit.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let sub_a = Address::generate(&env);
+    let sub_b = Address::generate(&env);
+
+    // Both subscribers can each hold one active sub on the same plan.
+    client.create_subscription_from_plan(&sub_a, &plan_id);
+    client.create_subscription_from_plan(&sub_b, &plan_id);
+
+    // But neither can create a second one.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&sub_a, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+    assert_eq!(
+        client.try_create_subscription_from_plan(&sub_b, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+#[test]
+fn test_create_from_plan_limit_2_allows_exactly_two() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Third must be rejected.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+#[test]
+fn test_create_from_plan_limit_independent_across_plans() {
+    // Limits on plan A must not affect plan B.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_a, merchant_a) = setup_plan(&env, &client);
+    let (plan_b, _merchant_b) = setup_plan(&env, &client);
+
+    client.set_plan_max_active_subs(&merchant_a, &plan_a, &1);
+    // plan_b has no limit set (default 0 = unlimited)
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_a);
+
+    // plan_a is now at limit for this subscriber.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_a),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+
+    // plan_b is unaffected.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber, &plan_b)
+        .is_ok());
+}
+
+// ── Counting rules: only Active status counts ─────────────────────────────────
+
+#[test]
+fn test_paused_subscription_does_not_count_toward_limit() {
+    // The implementation counts only Active status.
+    // A paused subscription frees the slot.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Pause the subscription.
+    client.pause_subscription(&sub_id, &subscriber);
+    assert_eq!(
+        client.get_subscription(&sub_id).status,
+        SubscriptionStatus::Paused
+    );
+
+    // Paused is not Active → slot is free, creation succeeds.
+    assert!(
+        client
+            .try_create_subscription_from_plan(&subscriber, &plan_id)
+            .is_ok(),
+        "paused subscription does not count toward the active limit"
+    );
+}
+
+#[test]
+fn test_cancelled_subscription_frees_slot() {
+    // Cancelling a subscription removes it from the active count,
+    // allowing a new one to be created up to the limit.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // At limit.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+
+    // Cancel frees the slot.
+    client.cancel_subscription(&sub_id, &subscriber);
+
+    // Now creation succeeds again.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber, &plan_id)
+        .is_ok());
+}
+
+#[test]
+fn test_insufficient_balance_subscription_does_not_count_toward_limit() {
+    // InsufficientBalance is not Active → slot is free.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Patch status to InsufficientBalance directly.
+    let mut sub = client.get_subscription(&sub_id);
+    sub.status = SubscriptionStatus::InsufficientBalance;
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&sub_id, &sub);
+    });
+
+    // InsufficientBalance is not Active → slot is free.
+    assert!(
+        client
+            .try_create_subscription_from_plan(&subscriber, &plan_id)
+            .is_ok(),
+        "InsufficientBalance subscription does not count toward the active limit"
+    );
+}
+
+// ── Limit updates after existing subscriptions ────────────────────────────────
+
+#[test]
+fn test_lowering_limit_below_existing_count_blocks_new_creation() {
+    // If a merchant lowers the limit after subscribers already hold more subs
+    // than the new cap, new creation is blocked but existing subs are untouched.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+
+    let subscriber = Address::generate(&env);
+    // Create 3 subs with no limit.
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // Now lower the limit to 2 (below current count of 3).
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+    assert_eq!(client.get_plan_max_active_subs(&plan_id), 2);
+
+    // New creation is blocked because current active (3) >= limit (2).
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+#[test]
+fn test_raising_limit_unblocks_creation() {
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // At limit.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+
+    // Raise limit to 2.
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+
+    // Now one more is allowed.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber, &plan_id)
+        .is_ok());
+
+    // But not a third.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+// ── Near-limit / race-aware scenarios ─────────────────────────────────────────
+
+#[test]
+fn test_near_limit_exactly_one_slot_remaining() {
+    // With limit=3 and 2 existing active subs, exactly one more is allowed.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &3);
+
+    let subscriber = Address::generate(&env);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+    client.create_subscription_from_plan(&subscriber, &plan_id);
+
+    // One slot left — must succeed.
+    assert!(client
+        .try_create_subscription_from_plan(&subscriber, &plan_id)
+        .is_ok());
+
+    // Now at limit — must fail.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&subscriber, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+#[test]
+fn test_near_limit_multiple_subscribers_independent_counts() {
+    // With limit=2, two subscribers each filling their quota independently
+    // must not interfere with each other.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &2);
+
+    let sub_a = Address::generate(&env);
+    let sub_b = Address::generate(&env);
+
+    // Fill sub_a's quota.
+    client.create_subscription_from_plan(&sub_a, &plan_id);
+    client.create_subscription_from_plan(&sub_a, &plan_id);
+
+    // sub_b is unaffected and can still create up to 2.
+    client.create_subscription_from_plan(&sub_b, &plan_id);
+    client.create_subscription_from_plan(&sub_b, &plan_id);
+
+    // Both are now at their individual limits.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&sub_a, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+    assert_eq!(
+        client.try_create_subscription_from_plan(&sub_b, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+
+#[test]
+fn test_cancel_and_recreate_cycles_respect_limit() {
+    // Repeatedly cancel-and-recreate must always respect the current limit.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    let subscriber = Address::generate(&env);
+
+    for _ in 0..3 {
+        let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+
+        // At limit.
+        assert_eq!(
+            client.try_create_subscription_from_plan(&subscriber, &plan_id),
+            Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+        );
+
+        // Cancel frees the slot for the next iteration.
+        client.cancel_subscription(&sub_id, &subscriber);
+    }
+}
+
+#[test]
+fn test_limit_1_with_mixed_subscriber_statuses() {
+    // With limit=1, verify the count only considers Active subs for the
+    // specific subscriber, not other subscribers' subs on the same plan.
+    let (env, client, _, _) = setup_test_env();
+    let (plan_id, merchant) = setup_plan(&env, &client);
+    client.set_plan_max_active_subs(&merchant, &plan_id, &1);
+
+    // sub_other fills their slot.
+    let sub_other = Address::generate(&env);
+    client.create_subscription_from_plan(&sub_other, &plan_id);
+
+    // sub_mine can still create their first sub.
+    let sub_mine = Address::generate(&env);
+    let my_id = client.create_subscription_from_plan(&sub_mine, &plan_id);
+    assert_eq!(
+        client.get_subscription(&my_id).status,
+        SubscriptionStatus::Active
+    );
+
+    // sub_mine is now at their limit.
+    assert_eq!(
+        client.try_create_subscription_from_plan(&sub_mine, &plan_id),
+        Err(Ok(Error::MaxConcurrentSubscriptionsReached))
+    );
+}
+

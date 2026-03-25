@@ -39,7 +39,8 @@ pub use types::{
     EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
     LifetimeCapReachedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent, MetadataSetEvent,
     MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
-    PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
+    PartialRefundEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
+    RecoveryEvent, RecoveryReason,
     Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
     SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
@@ -498,6 +499,14 @@ impl SubscriptionVault {
         max_active: u32,
     ) -> Result<(), Error> {
         subscription::do_set_plan_max_active_subs(&env, merchant, plan_template_id, max_active)
+    }
+
+    /// Returns the configured max-active-subscriptions limit for a plan template.
+    ///
+    /// A value of `0` means no limit is enforced. This is the default when
+    /// `set_plan_max_active_subs` has never been called for the given plan.
+    pub fn get_plan_max_active_subs(env: Env, plan_template_id: u32) -> u32 {
+        queries::get_plan_max_active_subs(&env, plan_template_id)
     }
 
     /// Migrates an existing subscription to a newer version of the same plan template.
@@ -969,5 +978,7 @@ impl SubscriptionVault {
 
 }
 
+#[cfg(test)]
+mod test;
 #[cfg(test)]
 mod test_governance;

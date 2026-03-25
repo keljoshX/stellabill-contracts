@@ -22,9 +22,9 @@ use crate::safe_math::{safe_add_balance, validate_non_negative};
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
-    SubscriptionStatus,
+    BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanMaxActiveUpdatedEvent, PlanTemplate,
+    PlanTemplateUpdatedEvent, SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent,
+    SubscriptionMigratedEvent, SubscriptionStatus,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -924,7 +924,24 @@ pub fn do_set_plan_max_active_subs(
         .instance()
         .set(&plan_max_active_key(env, plan_template_id), &max_active);
 
+    env.events().publish(
+        (Symbol::new(env, "plan_max_active_set"), plan_template_id),
+        PlanMaxActiveUpdatedEvent {
+            plan_template_id,
+            merchant,
+            max_active,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
     Ok(())
+}
+
+/// Returns the configured max-active limit for a plan template.
+/// Returns `0` when no limit has been set (meaning unlimited).
+#[allow(dead_code)]
+pub fn get_plan_max_active_subs(env: &Env, plan_template_id: u32) -> u32 {
+    get_plan_max_active(env, plan_template_id)
 }
 
 pub fn do_set_subscriber_credit_limit(

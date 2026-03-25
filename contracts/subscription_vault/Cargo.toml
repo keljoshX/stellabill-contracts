@@ -5,7 +5,7 @@ edition = "2021"
 description = "Stellarbill prepaid subscription vault - recurring USDC billing on Stellar"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["oracle-pricing"]
