@@ -108,7 +108,7 @@ mod test {
     #[should_panic(expected = "Error(Contract, #1014)")] // 1014 is InvalidExportLimit
     fn test_export_limit_zero_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, MigrationContract);
+        let contract_id = env.register(MigrationContract, ());
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -124,7 +124,7 @@ mod test {
     #[should_panic(expected = "Error(Contract, #1014)")]
     fn test_export_limit_exceeds_max_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, MigrationContract);
+        let contract_id = env.register(MigrationContract, ());
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 
@@ -140,7 +140,7 @@ mod test {
     #[should_panic(expected = "Error(Auth, InvalidAction)")]
     fn test_unauthorized_access_fails() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, MigrationContract);
+        let contract_id = env.register(MigrationContract, ());
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env); // Actual admin
 
@@ -155,7 +155,7 @@ mod test {
     #[test]
     fn test_sparse_id_pagination() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, MigrationContract);
+        let contract_id = env.register(MigrationContract, ());
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
 

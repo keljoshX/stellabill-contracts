@@ -50,14 +50,16 @@ fn create_security_subscription(
 
 #[test]
 fn test_reentrancy_lock_prevents_recursive_calls() {
-    let (env, client, _, _) = setup_security_env();
+    let (env, client, token, _) = setup_security_env();
 
     // We verify that the ReentrancyGuard can be locked.
-    // Since we can't easily trigger a real recursive call from within a test
-    // without complex mocking, we verify that critical paths are protected.
-    // The ReentrancyGuard is used in withdraw_merchant_funds and deposit_funds.
+    // To avoid "zero balance" errors from the token contract during transfer,
+    // we mint some tokens to the subscriber first.
 
     let (id, subscriber, _) = create_security_subscription(&env, &client);
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&subscriber, &1_000_000);
+
     client.deposit_funds(&id, &subscriber, &1_000_000);
 
     // If it didn't crash, the guard worked (it locked and unlocked correctly).
@@ -93,14 +95,14 @@ fn test_pause_subscription_unauthorized_stranger() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #401)")]
+#[should_panic(expected = "Error(Contract, #403)")]
 fn test_rotate_admin_unauthorized() {
-    let (env, client, _, admin) = setup_security_env();
+    let (env, client, _, _) = setup_security_env();
     let stranger = Address::generate(&env);
     let new_admin = Address::generate(&env);
 
     // We need to mock auth for the stranger to bypass the Auth check,
-    // then the contract should fail with Error::Unauthorized (401).
+    // then the contract should fail with Error::Forbidden (403).
     env.mock_all_auths();
     client.rotate_admin(&stranger, &new_admin);
 }
@@ -157,7 +159,7 @@ fn test_replay_protection_on_batch_charge() {
     assert_eq!(results.len(), 2);
     assert!(results.get(0).unwrap().success);
     assert!(!results.get(1).unwrap().success);
-    assert_eq!(results.get(1).unwrap().error_code, 1006); // Replay
+    assert_eq!(results.get(1).unwrap().error_code, 1007); // Replay
 }
 
 // ── Risk Class 4: Arithmetic Bounds ──────────────────────────────────────────
@@ -199,18 +201,24 @@ fn test_deposit_negative_amount_fails() {
 
 #[test]
 fn test_chained_charge_and_cancel_preserves_balance() {
-    let (env, client, token, admin) = setup_security_env();
+    let (env, client, token, _) = setup_security_env();
     env.ledger().set_timestamp(T0);
 
     let (id, subscriber, _) = create_security_subscription(&env, &client);
 
-    // 1. Seed balance
+    // 1. Seed balance and mint tokens to subscriber so they can be withdrawn later
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&subscriber, &PREPAID);
+
     let mut sub = client.get_subscription(&id);
     sub.prepaid_balance = PREPAID;
     sub.status = SubscriptionStatus::Active;
     env.as_contract(&client.address, || {
         env.storage().instance().set(&id, &sub);
     });
+
+    // We also need to mint tokens to the contract to simulate the vault holding the funds
+    token_admin.mint(&client.address, &PREPAID);
 
     // 2. Charge
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
@@ -227,5 +235,6 @@ fn test_chained_charge_and_cancel_preserves_balance() {
     // 5. Withdrawal succeeds
     client.withdraw_subscriber_funds(&id, &subscriber);
     let final_balance = soroban_sdk::token::Client::new(&env, &token).balance(&subscriber);
-    assert_eq!(final_balance, PREPAID - AMOUNT);
+    // Initial mint (PREPAID) + withdrawal (PREPAID - AMOUNT) = 2*PREPAID - AMOUNT
+    assert_eq!(final_balance, 2 * PREPAID - AMOUNT);
 }

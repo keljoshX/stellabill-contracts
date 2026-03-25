@@ -1,9 +1,8 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
-    AdminRotatedEvent, Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
-    SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
+    Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
 
 extern crate alloc;
@@ -588,7 +587,7 @@ fn test_subscription_struct_with_lifetime_cap() {
 
 #[test]
 fn test_charge_subscription_basic() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
@@ -852,7 +851,7 @@ fn test_rotate_admin() {
 
 #[test]
 fn test_emergency_stop() {
-    let (env, client, _, admin) = setup_test_env();
+    let (_env, client, _, admin) = setup_test_env();
     assert!(!client.get_emergency_stop_status());
     client.enable_emergency_stop(&admin);
     assert!(client.get_emergency_stop_status());
@@ -881,7 +880,7 @@ fn test_create_subscription_blocked_by_emergency_stop() {
 
 #[test]
 fn test_batch_charge() {
-    let (env, client, _, admin) = setup_test_env();
+    let (env, client, _, _) = setup_test_env();
     env.ledger().with_mut(|li| li.timestamp = T0);
 
     let (id1, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
@@ -2111,7 +2110,7 @@ fn test_cancel_from_various_states() {
     );
 
     // Cancel from InsufficientBalance
-    let id3 = client.create_subscription(
+    let _ = client.create_subscription(
         &subscriber,
         &merchant,
         &AMOUNT,
@@ -2195,7 +2194,7 @@ fn test_cancel_and_withdraw_events() {
 
     // Check cancellation event
     let events = env.events().all();
-    let cancel_event = events.get(events.len() - 1).unwrap();
+    let _cancel_event = events.get(events.len() - 1).unwrap();
     // Verification of event content is complex in Soroban tests, but we've added the code.
     // In a real test we'd use env.events().all().last() and check types.
 
@@ -2203,7 +2202,7 @@ fn test_cancel_and_withdraw_events() {
 
     // Check withdrawal event
     let events = env.events().all();
-    let withdraw_event = events.get(events.len() - 1).unwrap();
+    let _withdraw_event = events.get(events.len() - 1).unwrap();
 }
 
 #[test]
@@ -2612,7 +2611,7 @@ fn test_withdraw_subscriber_funds_after_cancel() {
 
 #[test]
 fn test_export_contract_snapshot() {
-    let (env, client, _, admin) = setup_test_env();
+    let (_env, client, _, admin) = setup_test_env();
     let snapshot = client.export_contract_snapshot(&admin);
     assert_eq!(snapshot.admin, admin);
     assert_eq!(snapshot.storage_version, 2);
@@ -4064,7 +4063,7 @@ fn setup_oracle_env<'a>(
 
 #[test]
 fn test_set_oracle_config_enabled_without_address_fails() {
-    let (env, client, _token, admin) = setup_test_env();
+    let (_env, client, _token, admin) = setup_test_env();
     let result = client.try_set_oracle_config(&admin, &true, &None::<Address>, &60u64);
     assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
 }
@@ -4100,7 +4099,7 @@ fn test_set_oracle_config_disabled_with_no_address_succeeds() {
 
 #[test]
 fn test_oracle_disabled_charge_uses_subscription_amount_directly() {
-    let (env, client, token, admin) = setup_test_env();
+    let (env, client, token, _) = setup_test_env();
     env.ledger().set_timestamp(T0);
 
     // Ensure oracle is off (default).
@@ -4256,9 +4255,7 @@ fn test_oracle_price_one_second_past_max_age_rejected() {
 
 #[test]
 fn test_oracle_enabled_no_address_stored_returns_not_configured() {
-    // Manually store enabled=true without an oracle address to simulate
-    // a misconfigured state (bypassing set_oracle_config validation).
-    let (env, client, token, admin) = setup_test_env();
+    let (env, client, token, _admin) = setup_test_env();
     env.ledger().set_timestamp(T0);
 
     // Force-write enabled=true with no oracle address directly into storage.
