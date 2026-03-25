@@ -13,7 +13,7 @@ Admin-only entrypoint to charge multiple subscriptions in a single transaction.
 
 - **Empty list:** returns empty Vec.
 - **Partial failures:** Each subscription is charged independently. A failure (e.g. IntervalNotElapsed, NotActive, InsufficientBalance) is recorded in that slot; other subscriptions are still charged. No rollback of successful charges.
-- **Duplicate IDs:** Each ID is processed once; duplicates can succeed or fail independently.
+- **Duplicate IDs:** Duplicate IDs are processed sequentially in-list. A later duplicate observes the state changes caused by the earlier occurrence, just like repeated `charge_subscription` calls.
 - **Auth:** Single admin auth for the whole batch; internal charges do not consume auth again.
 
 ## Error handling
@@ -26,3 +26,9 @@ Admin-only entrypoint to charge multiple subscriptions in a single transaction.
 - **Gas:** One transaction for N charges instead of N transactions; auth and contract call overhead paid once.
 - **Determinism:** Order of processing is the order of the input Vec; results are deterministic.
 - **Events:** Emit per-subscription events in the same order for indexing (if/when events are added).
+
+## Consistency Guidance
+
+- Batch callers should interpret `batch_charge` as "run `charge_subscription` for each ID in order and collect the outcomes."
+- Failed items must be evaluated with the same expectations as a direct single call, including any documented status transitions.
+- When reconciling results off-chain, compare by input index first, then by `success` and `error_code`.
