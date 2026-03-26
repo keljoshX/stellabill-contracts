@@ -41,6 +41,47 @@ pub enum DataKey {
     BillingStatement(u32, u32),
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
+    MerchantTokens(Address),
+    MerchantEarnings(Address, Address),
+}
+
+/// Accrued totals by charge kind.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccruedTotals {
+    pub interval: i128,
+    pub usage: i128,
+    pub one_off: i128,
+}
+
+/// Merchant token-scoped earnings.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenEarnings {
+    pub accruals: AccruedTotals,
+    pub withdrawals: i128,
+    pub refunds: i128,
+}
+
+/// Snapshot for merchant earnings reporting.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationSnapshot {
+    pub total_accruals: i128,
+    pub total_withdrawals: i128,
+    pub total_refunds: i128,
+    pub computed_balance: i128,
+}
+
+/// A snapshot tied to a specific token.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenReconciliationSnapshot {
+    pub token: Address,
+    pub total_accruals: i128,
+    pub total_withdrawals: i128,
+    pub total_refunds: i128,
+    pub computed_balance: i128,
 }
 
 /// Represents the lifecycle state of a subscription.

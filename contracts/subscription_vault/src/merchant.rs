@@ -28,6 +28,88 @@ fn merchant_balance_key(
     )
 }
 
+pub fn get_merchant_token_earnings(
+    env: &Env,
+    merchant: &Address,
+    token: &Address,
+) -> TokenEarnings {
+    let key = DataKey::MerchantEarnings(merchant.clone(), token.clone());
+    env.storage().instance().get(&key).unwrap_or(TokenEarnings {
+        accruals: AccruedTotals {
+            interval: 0,
+            usage: 0,
+            one_off: 0,
+        },
+        withdrawals: 0,
+        refunds: 0,
+    })
+}
+
+fn set_merchant_token_earnings(
+    env: &Env,
+    merchant: &Address,
+    token: &Address,
+    earnings: &TokenEarnings,
+) {
+    let key = DataKey::MerchantEarnings(merchant.clone(), token.clone());
+    env.storage().instance().set(&key, earnings);
+}
+
+fn add_merchant_token(env: &Env, merchant: &Address, token: &Address) {
+    let key = DataKey::MerchantTokens(merchant.clone());
+    let mut tokens: Vec<Address> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
+    if !tokens.contains(token) {
+        tokens.push_back(token.clone());
+        env.storage().instance().set(&key, &tokens);
+    }
+}
+
+pub fn get_merchant_total_earnings(env: &Env, merchant: &Address) -> Vec<(Address, TokenEarnings)> {
+    let key = DataKey::MerchantTokens(merchant.clone());
+    let tokens: Vec<Address> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
+    let mut result = Vec::new(env);
+    for token in tokens.iter() {
+        let earnings = get_merchant_token_earnings(env, merchant, &token);
+        result.push_back((token, earnings));
+    }
+    result
+}
+
+pub fn get_reconciliation_snapshot(
+    env: &Env,
+    merchant: &Address,
+) -> Vec<TokenReconciliationSnapshot> {
+    let key = DataKey::MerchantTokens(merchant.clone());
+    let tokens: Vec<Address> = env.storage().instance().get(&key).unwrap_or(Vec::new(env));
+    let mut result = Vec::new(env);
+
+    for token in tokens.iter() {
+        let earnings = get_merchant_token_earnings(env, merchant, &token);
+        let total_accruals = earnings
+            .accruals
+            .interval
+            .checked_add(earnings.accruals.usage)
+            .unwrap_or(0)
+            .checked_add(earnings.accruals.one_off)
+            .unwrap_or(0);
+
+        let computed_balance = total_accruals
+            .checked_sub(earnings.withdrawals)
+            .unwrap_or(0)
+            .checked_sub(earnings.refunds)
+            .unwrap_or(0);
+
+        result.push_back(TokenReconciliationSnapshot {
+            token: token.clone(),
+            total_accruals,
+            total_withdrawals: earnings.withdrawals,
+            total_refunds: earnings.refunds,
+            computed_balance,
+        });
+    }
+    result
+}
+
 pub fn get_merchant_balance(env: &Env, merchant: &Address) -> i128 {
     if let Ok(token_addr) = crate::admin::get_token(env) {
         return get_merchant_balance_by_token(env, merchant, &token_addr);
@@ -47,9 +129,14 @@ fn set_merchant_balance(env: &Env, merchant: &Address, token: &Address, balance:
 
 /// Credit merchant balance (used when subscription charges process).
 #[allow(dead_code)]
-pub fn credit_merchant_balance(env: &Env, merchant: &Address, amount: i128) -> Result<(), Error> {
+pub fn credit_merchant_balance(
+    env: &Env,
+    merchant: &Address,
+    amount: i128,
+    kind: BillingChargeKind,
+) -> Result<(), Error> {
     let token_addr = crate::admin::get_token(env)?;
-    credit_merchant_balance_for_token(env, merchant, &token_addr, amount)
+    credit_merchant_balance_for_token(env, merchant, &token_addr, amount, kind)
 }
 
 pub fn credit_merchant_balance_for_token(
@@ -57,11 +144,43 @@ pub fn credit_merchant_balance_for_token(
     merchant: &Address,
     token_addr: &Address,
     amount: i128,
+    kind: BillingChargeKind,
 ) -> Result<(), Error> {
     validate_non_negative(amount)?;
+
+    // Update simple balance
     let current = get_merchant_balance_by_token(env, merchant, token_addr);
     let new_balance = current.checked_add(amount).ok_or(Error::Overflow)?;
     set_merchant_balance(env, merchant, token_addr, &new_balance);
+
+    // Update earnings struct
+    let mut earnings = get_merchant_token_earnings(env, merchant, token_addr);
+    match kind {
+        BillingChargeKind::Interval => {
+            earnings.accruals.interval = earnings
+                .accruals
+                .interval
+                .checked_add(amount)
+                .ok_or(Error::Overflow)?
+        }
+        BillingChargeKind::Usage => {
+            earnings.accruals.usage = earnings
+                .accruals
+                .usage
+                .checked_add(amount)
+                .ok_or(Error::Overflow)?
+        }
+        BillingChargeKind::OneOff => {
+            earnings.accruals.one_off = earnings
+                .accruals
+                .one_off
+                .checked_add(amount)
+                .ok_or(Error::Overflow)?
+        }
+    }
+    set_merchant_token_earnings(env, merchant, token_addr, &earnings);
+    add_merchant_token(env, merchant, token_addr);
+
     Ok(())
 }
 
@@ -140,28 +259,51 @@ pub fn withdraw_merchant_funds_for_token(
     Ok(())
 }
 
-fn merchant_config_key(env: &Env, merchant: &Address) -> (Symbol, Address) {
-    (Symbol::new(env, "merch_conf"), merchant.clone())
-}
-
-pub fn set_merchant_config(
+pub fn merchant_refund(
     env: &Env,
     merchant: Address,
-    config: MerchantConfig,
+    subscriber: Address,
+    token_addr: Address,
+    amount: i128,
 ) -> Result<(), Error> {
     merchant.require_auth();
-    
-    // Validation: URL shouldn't be excessively long (standard limit 256)
-    if config.redirect_url.len() > 256 {
-        return Err(Error::InvalidAmount); // Reusing error or add specific one
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
     }
 
-    let key = merchant_config_key(env, &merchant);
-    env.storage().instance().set(&key, &config);
-    Ok(())
-}
+    let current = get_merchant_balance_by_token(env, &merchant, &token_addr);
+    if current == 0 {
+        return Err(Error::NotFound);
+    }
+    if amount > current {
+        return Err(Error::InsufficientBalance);
+    }
 
-pub fn get_merchant_config(env: &Env, merchant: Address) -> Option<MerchantConfig> {
-    let key = merchant_config_key(env, &merchant);
-    env.storage().instance().get(&key)
+    let new_balance = current.checked_sub(amount).ok_or(Error::Overflow)?;
+
+    // EFFECTS
+    set_merchant_balance(env, &merchant, &token_addr, &new_balance);
+
+    let mut earnings = get_merchant_token_earnings(env, &merchant, &token_addr);
+    earnings.refunds = earnings
+        .refunds
+        .checked_add(amount)
+        .ok_or(Error::Overflow)?;
+    set_merchant_token_earnings(env, &merchant, &token_addr, &earnings);
+
+    env.events().publish(
+        (Symbol::new(env, "merchant_refund"), merchant.clone()),
+        crate::types::MerchantRefundEvent {
+            merchant,
+            subscriber: subscriber.clone(),
+            token: token_addr.clone(),
+            amount,
+        },
+    );
+
+    // INTERACTIONS
+    let token_client = token::Client::new(env, &token_addr);
+    token_client.transfer(&env.current_contract_address(), &subscriber, &amount);
+
+    Ok(())
 }

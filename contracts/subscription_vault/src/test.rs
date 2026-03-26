@@ -3572,12 +3572,10 @@ fn test_oracle_stale_quote_rejected() {
 }
 
 #[test]
-fn test_multi_token_balances_are_isolated_per_token() {
+fn test_merchant_earnings_reconciliation() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(T0);
-    let contract_id = env.register(SubscriptionVault, ());
-    let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     let token_a = env
@@ -3587,49 +3585,117 @@ fn test_multi_token_balances_are_isolated_per_token() {
         .register_stellar_asset_contract_v2(admin.clone())
         .address();
 
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
     client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
     client.add_accepted_token(&admin, &token_b, &6);
 
     let merchant = Address::generate(&env);
-    let subscriber_a = Address::generate(&env);
-    let subscriber_b = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
     soroban_sdk::token::StellarAssetClient::new(&env, &token_a)
-        .mint(&subscriber_a, &100_000_000i128);
+        .mint(&subscriber, &1_000_000_000i128);
     soroban_sdk::token::StellarAssetClient::new(&env, &token_b)
-        .mint(&subscriber_b, &100_000_000i128);
+        .mint(&subscriber, &1_000_000_000i128);
 
     let id_a = client.create_subscription(
-        &subscriber_a,
+        &subscriber,
         &merchant,
         &5_000_000i128,
         &INTERVAL,
-        &false,
+        &true,
         &None::<i128>,
     );
     let id_b = client.create_subscription_with_token(
-        &subscriber_b,
+        &subscriber,
         &merchant,
         &token_b,
-        &7_000_000i128,
+        &10_000_000i128,
         &INTERVAL,
-        &false,
+        &true,
         &None::<i128>,
     );
-    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
-    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
 
+    client.deposit_funds(&id_a, &subscriber, &100_000_000i128);
+    client.deposit_funds(&id_b, &subscriber, &100_000_000i128);
+
+    // 1. Multi-interval accruals (Interval + Usage + OneOff)
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id_a);
-    client.charge_subscription(&id_b);
+    client.charge_subscription(&id_a); // + 5m (token A)
+    client.charge_subscription(&id_b); // + 10m (token B)
 
-    assert_eq!(
-        client.get_merchant_balance_by_token(&merchant, &token_a),
-        5_000_000i128
-    );
-    assert_eq!(
-        client.get_merchant_balance_by_token(&merchant, &token_b),
-        7_000_000i128
-    );
+    client.charge_usage(&id_a, &2_000_000i128); // + 2m (token A)
+    client.charge_one_off(&id_b, &merchant, &3_000_000i128); // + 3m (token B)
+
+    // Verify TokenEarnings
+    let earnings_a = client.get_merchant_token_earnings(&merchant, &token_a);
+    assert_eq!(earnings_a.accruals.interval, 5_000_000);
+    assert_eq!(earnings_a.accruals.usage, 2_000_000);
+    assert_eq!(earnings_a.accruals.one_off, 0);
+    assert_eq!(earnings_a.withdrawals, 0);
+    assert_eq!(earnings_a.refunds, 0);
+
+    let earnings_b = client.get_merchant_token_earnings(&merchant, &token_b);
+    assert_eq!(earnings_b.accruals.interval, 10_000_000);
+    assert_eq!(earnings_b.accruals.usage, 0);
+    assert_eq!(earnings_b.accruals.one_off, 3_000_000);
+
+    // 2. Partial withdrawals
+    client.withdraw_merchant_token_funds(&merchant, &token_a, &3_000_000i128);
+
+    // 3. Refund scenarios
+    client.merchant_refund(&merchant, &subscriber, &token_a, &1_000_000i128);
+    client.merchant_refund(&merchant, &subscriber, &token_b, &2_000_000i128);
+
+    // 4. Verify reconciliation snapshot
+    let snapshots = client.get_reconciliation_snapshot(&merchant);
+    assert_eq!(snapshots.len(), 2);
+
+    for snap in snapshots.iter() {
+        if snap.token == token_a {
+            assert_eq!(snap.total_accruals, 7_000_000);
+            assert_eq!(snap.total_withdrawals, 3_000_000);
+            assert_eq!(snap.total_refunds, 1_000_000);
+            assert_eq!(snap.computed_balance, 3_000_000);
+            assert_eq!(
+                client.get_merchant_balance_by_token(&merchant, &token_a),
+                3_000_000
+            );
+        } else if snap.token == token_b {
+            assert_eq!(snap.total_accruals, 13_000_000);
+            assert_eq!(snap.total_withdrawals, 0);
+            assert_eq!(snap.total_refunds, 2_000_000);
+            assert_eq!(snap.computed_balance, 11_000_000);
+            assert_eq!(
+                client.get_merchant_balance_by_token(&merchant, &token_b),
+                11_000_000
+            );
+        } else {
+            panic!("Unexpected token in snapshot");
+        }
+    }
+
+    // 5. Full withdrawals & zero balances edge cases
+    client.withdraw_merchant_token_funds(&merchant, &token_a, &3_000_000i128);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 0);
+
+    let res = client.try_merchant_refund(&merchant, &subscriber, &token_a, &1_000_000i128);
+    assert_eq!(res, Err(Ok(Error::NotFound)));
+
+    let res2 = client.try_withdraw_merchant_token_funds(&merchant, &token_a, &1_000_000i128);
+    assert_eq!(res2, Err(Ok(Error::NotFound)));
+
+    // Final check for no balance drift
+    let snap_a = client
+        .get_reconciliation_snapshot(&merchant)
+        .into_iter()
+        .find(|s| s.token == token_a)
+        .unwrap();
+    assert_eq!(snap_a.total_accruals, 7_000_000);
+    assert_eq!(snap_a.total_withdrawals, 6_000_000);
+    assert_eq!(snap_a.total_refunds, 1_000_000);
+    assert_eq!(snap_a.computed_balance, 0);
 }
 
 #[test]

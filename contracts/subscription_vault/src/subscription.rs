@@ -521,6 +521,14 @@ pub fn do_charge_one_off(
         .checked_sub(amount)
         .ok_or(Error::Overflow)?;
 
+    crate::merchant::credit_merchant_balance_for_token(
+        env,
+        &sub.merchant,
+        &sub.token,
+        amount,
+        BillingChargeKind::OneOff,
+    )?;
+
     env.storage().instance().set(&subscription_id, &sub);
     append_statement(
         env,

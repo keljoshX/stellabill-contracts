@@ -120,6 +120,7 @@ pub fn charge_one(
                 &sub.merchant,
                 &sub.token,
                 charge_amount,
+                BillingChargeKind::Interval,
             )?;
             sub.last_payment_timestamp = now;
 
@@ -259,6 +260,14 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         .prepaid_balance
         .checked_sub(usage_amount)
         .ok_or(Error::Overflow)?;
+
+    crate::merchant::credit_merchant_balance_for_token(
+        env,
+        &sub.merchant,
+        &sub.token,
+        usage_amount,
+        BillingChargeKind::Usage,
+    )?;
 
     if sub.prepaid_balance == 0 {
         validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
