@@ -23,8 +23,7 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent,
-    SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
-    SubscriptionStatus,
+    Subscription, SubscriptionMigratedEvent, SubscriptionStatus, UsageLimits, UsageState,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -326,6 +325,10 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
+    if subscriber != sub.subscriber {
+        return Err(Error::Forbidden);
+    }
+
     let token_addr = sub.token.clone();
 
     // Enforce credit limit for additional prepaid balance being loaded.
@@ -341,8 +344,30 @@ pub fn do_deposit_funds(
 
     env.events().publish(
         (Symbol::new(env, "deposited"), subscription_id),
-        (subscriber, amount, sub.prepaid_balance),
+        FundsDepositedEvent {
+            subscription_id,
+            subscriber,
+            amount,
+            prepaid_balance: sub.prepaid_balance,
+        },
     );
+
+    if (sub.status == SubscriptionStatus::InsufficientBalance
+        || sub.status == SubscriptionStatus::GracePeriod)
+        && sub.prepaid_balance >= sub.amount
+    {
+        env.events().publish(
+            (Symbol::new(env, "recovery_ready"), subscription_id),
+            SubscriptionRecoveryReadyEvent {
+                subscription_id,
+                subscriber: sub.subscriber,
+                prepaid_balance: sub.prepaid_balance,
+                required_amount: sub.amount,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
     Ok(())
 }
 
@@ -424,14 +449,14 @@ pub fn do_pause_subscription(
     Ok(())
 }
 
-/// Resume a paused or insufficient-balance subscription back to `Active`.
+/// Resume a paused, grace-period, or insufficient-balance subscription back to `Active`.
 ///
 /// # Authorization
 /// Only the subscription's `subscriber` or `merchant` may resume.
 /// Any other caller receives [`Error::Forbidden`].
 ///
 /// # Transition guard
-/// `Paused → Active` and `InsufficientBalance → Active` are permitted.
+/// `Paused → Active`, `GracePeriod → Active`, and `InsufficientBalance → Active` are permitted.
 /// Any other source state (including `Cancelled`) returns [`Error::InvalidStatusTransition`].
 ///
 /// # Events
@@ -455,6 +480,13 @@ pub fn do_resume_subscription(
     // Idempotent: already active — nothing to do, no event.
     if sub.status == SubscriptionStatus::Active {
         return Ok(());
+    }
+
+    if (sub.status == SubscriptionStatus::InsufficientBalance
+        || sub.status == SubscriptionStatus::GracePeriod)
+        && sub.prepaid_balance < sub.amount
+    {
+        return Err(Error::InsufficientBalance);
     }
 
     sub.status = SubscriptionStatus::Active;
@@ -512,6 +544,14 @@ pub fn do_charge_one_off(
         .prepaid_balance
         .checked_sub(amount)
         .ok_or(Error::Overflow)?;
+
+    crate::merchant::credit_merchant_balance_for_token(
+        env,
+        &sub.merchant,
+        &sub.token,
+        amount,
+        BillingChargeKind::OneOff,
+    )?;
 
     env.storage().instance().set(&subscription_id, &sub);
     append_statement(
@@ -797,6 +837,12 @@ pub fn do_update_plan_template(
     // Do not allow changing token through versioning – that would be a different plan family.
     let token = existing.token.clone();
 
+    // Enforce usage flag consistency: usage_enabled cannot be changed through versioning
+    // to prevent accidental billing model shifts for downstream subscribers.
+    if usage_enabled != existing.usage_enabled {
+        return Err(Error::InvalidInput);
+    }
+
     let new_plan_id = next_plan_id(env);
     let new_version = existing.version + 1;
     let updated = PlanTemplate {
@@ -869,6 +915,11 @@ pub fn do_migrate_subscription_to_plan(
 
     // For safety, do not allow token switches via migration.
     if new_plan.token != sub.token {
+        return Err(Error::InvalidInput);
+    }
+
+    // For safety, do not allow billing model switches via migration.
+    if new_plan.usage_enabled != sub.usage_enabled {
         return Err(Error::InvalidInput);
     }
 
@@ -959,4 +1010,43 @@ pub fn get_subscriber_exposure(
     token: Address,
 ) -> Result<i128, Error> {
     compute_subscriber_exposure(env, &subscriber, &token)
+}
+
+pub fn do_configure_usage_limits(
+    env: &Env,
+    merchant: Address,
+    subscription_id: u32,
+    rate_limit_max_calls: Option<u32>,
+    rate_window_secs: u64,
+    burst_min_interval_secs: u64,
+    usage_cap_units: Option<i128>,
+) -> Result<(), Error> {
+    merchant.require_auth();
+
+    let sub = get_subscription(env, subscription_id)?;
+    if sub.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+    if !sub.usage_enabled {
+        return Err(Error::UsageNotEnabled);
+    }
+
+    if let Some(cap) = usage_cap_units {
+        if cap <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+    }
+
+    let limits = UsageLimits {
+        rate_limit_max_calls,
+        rate_window_secs,
+        burst_min_interval_secs,
+        usage_cap_units,
+    };
+
+    env.storage()
+        .instance()
+        .set(&DataKey::UsageLimits(subscription_id), &limits);
+
+    Ok(())
 }

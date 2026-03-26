@@ -148,12 +148,13 @@ Emitted when a subscription is cancelled by subscriber or merchant.
 
 ### MerchantWithdrawalEvent
 
-**Topic:** `withdraw`
+**Topic:** `withdrawn`
 
 Emitted when a merchant withdraws accumulated funds.
 
 **Fields:**
 - `merchant` (Address): Merchant withdrawing funds
+- `token` (Address): Token bucket debited for the withdrawal
 - `amount` (i128): Amount withdrawn (in token base units)
 - `remaining_balance` (i128): Merchant's accumulated balance remaining after withdrawal
 

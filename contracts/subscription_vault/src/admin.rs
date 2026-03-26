@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use crate::charge_core::charge_one;
+use crate::charge_core::{charge_one, ChargeExecutionResult};
 use crate::types::{
     AcceptedToken, AdminRotatedEvent, BatchChargeResult, Error, RecoveryEvent, RecoveryReason,
     SubscriptionStatus,
@@ -43,7 +43,7 @@ pub fn do_init(
     instance.set(&Symbol::new(env, "admin"), &admin);
     instance.set(&Symbol::new(env, "min_topup"), &min_topup);
     instance.set(&Symbol::new(env, "grace_period"), &grace_period);
-
+    instance.set(&DataKey::SchemaVersion, &1u32);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
         (token, admin, min_topup, grace_period),
@@ -196,35 +196,15 @@ pub fn do_batch_charge(
     let mut results = Vec::new(env);
     for id in subscription_ids.iter() {
         let r = charge_one(env, id, now, None);
-        let res = match r {
-            Ok(()) => BatchChargeResult {
+        let res = match &r {
+            Ok(ChargeExecutionResult::Charged) => BatchChargeResult {
                 success: true,
                 error_code: 0,
             },
-            Err(Error::InsufficientBalance) => {
-                // If the subscription entered grace or insufficient state as a result
-                // of the attempted charge, preserve the single-charge behavior.
-                if let Ok(sub) = crate::queries::get_subscription(env, id) {
-                    if sub.status == SubscriptionStatus::GracePeriod
-                        || sub.status == SubscriptionStatus::InsufficientBalance
-                    {
-                        BatchChargeResult {
-                            success: true,
-                            error_code: 0,
-                        }
-                    } else {
-                        BatchChargeResult {
-                            success: false,
-                            error_code: Error::InsufficientBalance.to_code(),
-                        }
-                    }
-                } else {
-                    BatchChargeResult {
-                        success: false,
-                        error_code: Error::InsufficientBalance.to_code(),
-                    }
-                }
-            }
+            Ok(ChargeExecutionResult::InsufficientBalance) => BatchChargeResult {
+                success: false,
+                error_code: Error::InsufficientBalance.to_code(),
+            },
             Err(e) => BatchChargeResult {
                 success: false,
                 error_code: e.to_code(),

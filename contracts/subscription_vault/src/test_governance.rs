@@ -6,7 +6,7 @@ fn test_merchant_config_governance_enforced() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, SubscriptionVault);
+    let contract_id = env.register(SubscriptionVault, ());
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let merchant_a = Address::generate(&env);
@@ -25,7 +25,7 @@ fn test_unauthorized_merchant_config_update() {
     let env = Env::default();
     // No mock_all_auths here. Calling require_auth() without a signature
     // will trigger an Auth error from the Soroban host.
-    let contract_id = env.register_contract(None, SubscriptionVault);
+    let contract_id = env.register(SubscriptionVault, ());
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let merchant = Address::generate(&env);

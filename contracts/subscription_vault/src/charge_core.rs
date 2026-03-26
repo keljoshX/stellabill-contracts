@@ -1,8 +1,8 @@
 //! Single charge logic (no auth). Used by charge_subscription and batch_charge.
 //!
 //! Charge runs only when status is Active or GracePeriod. On insufficient balance the
-//! function returns an error without persisting failure-path state mutations, so
-//! batch and single-charge entrypoints observe the same ledger semantics.
+//! subscription is moved to a recoverable non-active state and an explicit failure
+//! event is emitted without mutating financial accounting state.
 //! On lifetime cap exhaustion the subscription is cancelled (terminal state).
 //!
 //! See `docs/subscription_lifecycle.md` for lifecycle details.
@@ -17,9 +17,10 @@ use crate::safe_math::safe_sub_balance;
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus,
+    BillingChargeKind, DataKey, Error, LifetimeCapReachedEvent, SubscriptionChargedEvent,
+    SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
 };
-use soroban_sdk::{symbol_short, Env, Symbol};
+use soroban_sdk::{symbol_short, Env, String, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
 const KEY_IDEM: Symbol = symbol_short!("idem");
@@ -32,14 +33,26 @@ fn idem_key(subscription_id: u32) -> (Symbol, u32) {
     (KEY_IDEM, subscription_id)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChargeExecutionResult {
+    Charged,
+    InsufficientBalance,
+}
+
 /// Performs a single interval-based charge with optional replay protection.
 pub fn charge_one(
     env: &Env,
     subscription_id: u32,
     now: u64,
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
-) -> Result<(), Error> {
+) -> Result<ChargeExecutionResult, Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+    let merchant = sub.merchant.clone();
+
+    if crate::merchant::get_merchant_paused(env, merchant.clone()) {
+        return Err(Error::MerchantPaused);
+    }
+
     let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
 
     if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
@@ -56,7 +69,7 @@ pub fn charge_one(
             .get::<_, soroban_sdk::BytesN<32>>(&idem_key(subscription_id))
         {
             if stored == *k {
-                return Ok(());
+                return Ok(ChargeExecutionResult::Charged);
             }
         }
     }
@@ -100,7 +113,7 @@ pub fn charge_one(
                 },
             );
 
-            return Ok(());
+            return Ok(ChargeExecutionResult::Charged);
         }
     }
 
@@ -114,6 +127,7 @@ pub fn charge_one(
                 &sub.merchant,
                 &sub.token,
                 charge_amount,
+                BillingChargeKind::Interval,
             )?;
             sub.last_payment_timestamp = now;
 
@@ -181,7 +195,7 @@ pub fn charge_one(
                 }
             }
 
-            Ok(())
+            Ok(ChargeExecutionResult::Charged)
         }
         // charge_one.rs  —  replace the entire Err(_) arm in charge_one()
         Err(_) => {
@@ -191,86 +205,51 @@ pub fn charge_one(
                 .checked_add(sub.interval_seconds)
                 .ok_or(Error::Overflow)?;
 
-            // No grace period configured -> move to InsufficientBalance and keep state.
-            if grace_duration == 0 {
-                validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
-                sub.status = SubscriptionStatus::InsufficientBalance;
-                sub.grace_start_timestamp = None;
-                env.storage().instance().set(&subscription_id, &sub);
-                return Err(Error::InsufficientBalance);
+            let target_status = if grace_duration > 0 && now < grace_expires {
+                SubscriptionStatus::GracePeriod
+            } else {
+                SubscriptionStatus::InsufficientBalance
+            };
+
+            if sub.status != target_status {
+                validate_status_transition(&sub.status, &target_status)?;
+                sub.status = target_status.clone();
             }
 
-            // ACTIVE transition logic (first insufficiency).
-            if sub.status == SubscriptionStatus::Active {
-                let grace_expires = due_timestamp
-                    .checked_add(grace_duration)
-                    .ok_or(Error::Overflow)?;
+            storage.set(&subscription_id, &sub);
 
-                if now == due_timestamp {
-                    validate_status_transition(&sub.status, &SubscriptionStatus::GracePeriod)?;
-                    sub.status = SubscriptionStatus::GracePeriod;
-                    sub.grace_start_timestamp = Some(due_timestamp);
-                    env.storage().instance().set(&subscription_id, &sub);
+            let shortfall = charge_amount.saturating_sub(sub.prepaid_balance).max(0);
+            env.events().publish(
+                (Symbol::new(env, "charge_failed"), subscription_id),
+                SubscriptionChargeFailedEvent {
+                    subscription_id,
+                    merchant: sub.merchant,
+                    required_amount: charge_amount,
+                    available_balance: sub.prepaid_balance,
+                    shortfall,
+                    resulting_status: target_status,
+                    timestamp: now,
+                },
+            );
 
-                    env.events().publish(
-                        (Symbol::new(env, "grace_period_entered"), subscription_id),
-                        crate::types::GracePeriodEnteredEvent {
-                            subscription_id,
-                            grace_expires,
-                            timestamp: due_timestamp,
-                        },
-                    );
-
-                    return Err(Error::InsufficientBalance);
-                }
-
-                if now <= grace_expires {
-                    // If we are inside theoretical grace window but were not charged at due
-                    // exactly, we still treat this as a charge failure without changing state.
-                    return Err(Error::InsufficientBalance);
-                }
-
-                // Past grace window relative to the due time, no transition persisted.
-                return Err(Error::InsufficientBalance);
-            }
-
-            // GRACE_PERIOD state: either still failing or now expired.
-            if sub.status == SubscriptionStatus::GracePeriod {
-                let grace_start = sub
-                    .grace_start_timestamp
-                    .ok_or(Error::InvalidStatusTransition)?;
-                let grace_expires = grace_start
-                    .checked_add(grace_duration)
-                    .ok_or(Error::Overflow)?;
-
-                if now < grace_expires {
-                    return Err(Error::InsufficientBalance);
-                }
-
-                validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
-                sub.status = SubscriptionStatus::InsufficientBalance;
-                sub.grace_start_timestamp = None;
-                env.storage().instance().set(&subscription_id, &sub);
-
-                env.events().publish(
-                    (Symbol::new(env, "grace_period_expired"), subscription_id),
-                    crate::types::GracePeriodExpiredEvent {
-                        subscription_id,
-                        timestamp: now,
-                    },
-                );
-
-                return Err(Error::InsufficientBalance);
-            }
-
-            Err(Error::InsufficientBalance)
+            Ok(ChargeExecutionResult::InsufficientBalance)
         }
     }
 }
 
 /// Debit a metered `usage_amount` from a subscription's prepaid balance.
-pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
+pub fn charge_usage_one(
+    env: &Env,
+    subscription_id: u32,
+    usage_amount: i128,
+    reference: String,
+) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+    let merchant = sub.merchant.clone();
+
+    if crate::merchant::get_merchant_paused(env, merchant.clone()) {
+        return Err(Error::MerchantPaused);
+    }
 
     if sub.status != SubscriptionStatus::Active {
         return Err(Error::NotActive);
@@ -288,18 +267,94 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         return Err(Error::InsufficientPrepaidBalance);
     }
 
-    // -- Lifetime cap pre-check -----------------------------------------------
-    if let Some(cap) = sub.lifetime_cap {
-        let new_charged = sub
-            .lifetime_charged
+    let now = env.ledger().timestamp();
+    let storage = env.storage().instance();
+
+    // Replay Protection
+    let ref_key = DataKey::UsageReference(subscription_id);
+    if let Some(last_ref) = storage.get::<_, String>(&ref_key) {
+        if last_ref == reference {
+            return Err(Error::Replay);
+        }
+    }
+
+    // Rate Limiting and Burst Protection
+    if let Some(limits) = storage.get::<_, UsageLimits>(&DataKey::UsageLimits(subscription_id)) {
+        let mut state: UsageState = storage
+            .get(&DataKey::UsageState(subscription_id))
+            .unwrap_or(UsageState {
+                last_usage_timestamp: 0,
+                window_start_timestamp: now,
+                window_call_count: 0,
+                current_period_usage_units: 0,
+                period_index: 0,
+            });
+
+        // Burst protection
+        if state.last_usage_timestamp > 0 {
+            let elapsed = now.saturating_sub(state.last_usage_timestamp);
+            if elapsed < limits.burst_min_interval_secs {
+                return Err(Error::BurstLimitExceeded);
+            }
+        }
+
+        // Period Cap Check
+        let current_period_index = if sub.interval_seconds > 0 {
+            now / sub.interval_seconds
+        } else {
+            0
+        };
+
+        if state.period_index != current_period_index {
+            state.current_period_usage_units = 0;
+            state.period_index = current_period_index;
+        }
+
+        if let Some(cap) = limits.usage_cap_units {
+            let projected_usage = state
+                .current_period_usage_units
+                .checked_add(usage_amount)
+                .ok_or(Error::Overflow)?;
+            if projected_usage > cap {
+                return Err(Error::UsageCapExceeded);
+            }
+        }
+
+        // Rate Limit Window Check
+        if let Some(max_calls) = limits.rate_limit_max_calls {
+            let window_elapsed = now.saturating_sub(state.window_start_timestamp);
+            if window_elapsed >= limits.rate_window_secs {
+                state.window_start_timestamp = now;
+                state.window_call_count = 0;
+            }
+
+            if state.window_call_count >= max_calls {
+                return Err(Error::RateLimitExceeded);
+            }
+            state.window_call_count = state.window_call_count.saturating_add(1);
+        }
+
+        state.current_period_usage_units = state
+            .current_period_usage_units
             .checked_add(usage_amount)
             .ok_or(Error::Overflow)?;
+        state.last_usage_timestamp = now;
+
+        storage.set(&DataKey::UsageState(subscription_id), &state);
+    }
+
+    // -- Lifetime cap pre-check -----------------------------------------------
+    let new_charged = sub
+        .lifetime_charged
+        .checked_add(usage_amount)
+        .ok_or(Error::Overflow)?;
+
+    if let Some(cap) = sub.lifetime_cap {
         if new_charged > cap {
             validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
             sub.status = SubscriptionStatus::Cancelled;
             env.storage().instance().set(&subscription_id, &sub);
 
-            let now = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
                 LifetimeCapReachedEvent {
@@ -312,13 +367,21 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
 
             return Ok(());
         }
-        sub.lifetime_charged = new_charged;
     }
+    sub.lifetime_charged = new_charged;
 
     sub.prepaid_balance = sub
         .prepaid_balance
         .checked_sub(usage_amount)
         .ok_or(Error::Overflow)?;
+
+    crate::merchant::credit_merchant_balance_for_token(
+        env,
+        &sub.merchant,
+        &sub.token,
+        usage_amount,
+        BillingChargeKind::Usage,
+    )?;
 
     if sub.prepaid_balance == 0 {
         validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
@@ -335,7 +398,6 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         sub.status = SubscriptionStatus::Cancelled;
 
         if let Some(cap) = sub.lifetime_cap {
-            let now = env.ledger().timestamp();
             env.events().publish(
                 (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
                 LifetimeCapReachedEvent {
@@ -348,15 +410,30 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         }
     }
 
-    env.storage().instance().set(&subscription_id, &sub);
+    storage.set(&subscription_id, &sub);
+    storage.set(&ref_key, &reference);
+
     append_statement(
         env,
         subscription_id,
         usage_amount,
         sub.merchant.clone(),
         BillingChargeKind::Usage,
-        env.ledger().timestamp(),
-        env.ledger().timestamp(),
+        now,
+        now,
     );
+
+    env.events().publish(
+        (Symbol::new(env, "usage_statement"), subscription_id),
+        UsageStatementEvent {
+            subscription_id,
+            merchant: sub.merchant.clone(),
+            usage_amount,
+            token: sub.token.clone(),
+            timestamp: now,
+            reference,
+        },
+    );
+
     Ok(())
 }

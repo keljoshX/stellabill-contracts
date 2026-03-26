@@ -55,9 +55,9 @@ This document describes the event emission implementation and testing strategy f
 ### Withdrawal Events
 
 #### `withdrawn`
-- **Topics**: `["withdrawn", merchant: Address]`
-- **Data**: `(amount: i128)`
-- **Emitted by**: `withdraw_merchant_funds()`
+- **Topics**: `["withdrawn", merchant: Address, token: Address]`
+- **Data**: `MerchantWithdrawalEvent { merchant, token, amount, remaining_balance }`
+- **Emitted by**: `withdraw_merchant_funds()` / `withdraw_merchant_token_funds()`
 - **When**: Merchant withdraws funds
 
 ### Config Events
