@@ -6,7 +6,7 @@
 
 use crate::charge_core::charge_one;
 use crate::types::{
-    AcceptedToken, BatchChargeResult, DataKey, Error, RecoveryEvent, RecoveryReason,
+    AcceptedToken, AdminRotatedEvent, BatchChargeResult, Error, RecoveryEvent, RecoveryReason,
 };
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
@@ -230,13 +230,31 @@ pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) ->
         return Err(Error::Forbidden);
     }
 
+    // Disallow self-rotation: rotating to the same address is a no-op that
+    // could mask misconfiguration and wastes a transaction.
+    if new_admin == current_admin {
+        return Err(Error::SelfRotation);
+    }
+
+    // Disallow rotating to the contract itself: that would permanently lock
+    // admin privileges since the contract cannot sign transactions.
+    if new_admin == env.current_contract_address() {
+        return Err(Error::InvalidNewAdmin);
+    }
+
+    // Atomic swap: write new admin before emitting the event so any indexer
+    // that reads state on the event sees the already-updated value.
     env.storage()
         .instance()
         .set(&Symbol::new(env, "admin"), &new_admin);
 
     env.events().publish(
-        (Symbol::new(env, "admin_rotation"), current_admin.clone()),
-        (current_admin, new_admin, env.ledger().timestamp()),
+        (Symbol::new(env, "admin_rotated"),),
+        AdminRotatedEvent {
+            old_admin: current_admin,
+            new_admin,
+            timestamp: env.ledger().timestamp(),
+        },
     );
 
     Ok(())

@@ -64,8 +64,8 @@ The enum is defined in `contracts/subscription_vault/src/types.rs`. Transition r
 
 ### InsufficientBalance
 
-- **Meaning:** A charge attempt failed because `prepaid_balance < amount`. Subscription is blocked from further charges until the subscriber tops up and then calls `resume_subscription`.
-- **How entered:** Only automatically, when `charge_one` (used by `charge_subscription` and `batch_charge`) runs on an Active subscription and balance deduction would underflow (insufficient balance). There is no entrypoint that sets status to InsufficientBalance directly.
+- **Meaning:** A stored non-active state representing a subscription that requires topping up and explicit resume before future charges can proceed.
+- **How entered:** This state may exist in migrated or previously stored data, but current public charge entrypoints do not persist a transition into `InsufficientBalance` on failed charges.
 - **How exited:** `resume_subscription` → Active (after the subscriber has deposited); `cancel_subscription` → Cancelled. The contract does **not** auto-transition to Active on deposit; the subscriber must call `resume_subscription` after topping up.
 - **Charges:** Not allowed. Charge returns `Error::NotActive` (1002).
 
@@ -139,7 +139,7 @@ flowchart LR
 - **Entrypoints:** `charge_subscription(env, subscription_id)` and `batch_charge(env, subscription_ids)`.  
   Auth: admin.  
   Both delegate to `charge_one` in `contracts/subscription_vault/src/charge_core.rs`.
-- **Behavior:** Only subscriptions with status **Active** are charged. If status is not Active, `charge_one` returns `Error::NotActive` (1002) without mutating storage. For Active subscriptions: if `now < last_payment_timestamp + interval_seconds`, returns `Error::IntervalNotElapsed` (1001). Otherwise attempts to deduct `amount` from `prepaid_balance`; on success updates balance and `last_payment_timestamp` and returns `Ok(())`; on insufficient balance the subscription is transitioned to **InsufficientBalance**, storage is updated, and the function returns `Err(Error::InsufficientBalance)` (1003).
+- **Behavior:** Only subscriptions with status **Active** are charged. If status is not Active, `charge_one` returns `Error::NotActive` (1002) without mutating storage. For Active subscriptions: if `now < last_payment_timestamp + interval_seconds`, returns `Error::IntervalNotElapsed` (1001). Otherwise attempts to deduct `amount` from `prepaid_balance`; on success updates balance and `last_payment_timestamp` and returns `Ok(())`; on insufficient balance it returns `Err(Error::InsufficientBalance)` (1003) without persisting failure-path ledger mutations.
 
 ### Pause / Resume / Cancel
 
@@ -155,17 +155,17 @@ All three use `validate_status_transition` before updating status.
 
 1. **Only Active subscriptions are charged.** Paused, Cancelled, and InsufficientBalance cause `charge_one` to return `Error::NotActive` (1002) immediately, with no state change.
 
-2. **InsufficientBalance is only entered by a failed charge.** There is no entrypoint that sets status to InsufficientBalance; it is set only inside `charge_one` when deduction would underflow. See `contracts/subscription_vault/src/charge_core.rs`.
+2. **Failed interval charges do not persist hidden state transitions.** There is no public charge path that commits extra failure-path mutations that differ between single and batch charging. See `contracts/subscription_vault/src/charge_core.rs`.
 
 3. **Cancelled is terminal.** No transitions out of Cancelled; resume and all other status changes from Cancelled return `Error::InvalidStatusTransition` (400).
 
 4. **Idempotent same-status.** Transitioning to the same status (e.g. calling cancel when already Cancelled) is allowed by `validate_status_transition`, so callers can safely retry.
 
-5. **Resume from InsufficientBalance is explicit.** Depositing does not change status. After topping up, the subscriber must call `resume_subscription` to move back to Active before the next charge can succeed.
+5. **Resume behavior remains explicit for stored non-active states.** Depositing does not change status. If a subscription is already in `InsufficientBalance`, the subscriber must call `resume_subscription` to move back to Active before the next charge can succeed.
 
 6. **Interval check.** A charge is only attempted when `now >= last_payment_timestamp + interval_seconds`; otherwise `Error::IntervalNotElapsed` (1001) is returned.
 
-7. **Batch charge.** `batch_charge` invokes `charge_one` per id; each subscription’s status is updated independently (e.g. one can move to InsufficientBalance while others succeed). Per-item errors are reported in `BatchChargeResult`; see `docs/batch_charge.md`.
+7. **Batch charge.** `batch_charge` invokes `charge_one` per id and preserves the same ledger semantics as repeated single charges in input order. Successful items commit; failed items return their error code without extra side effects. Per-item errors are reported in `BatchChargeResult`; see `docs/batch_charge.md`.
 
 ---
 
@@ -181,7 +181,7 @@ From `contracts/subscription_vault/src/types.rs`:
 | 404 | `NotFound` | Subscription id not found. |
 | 1001 | `IntervalNotElapsed` | Charge attempted before interval elapsed. |
 | 1002 | `NotActive` | Charge attempted on non-Active subscription. |
-| 1003 | `InsufficientBalance` | Charge failed due to insufficient prepaid balance (and status set to InsufficientBalance). |
+| 1003 | `InsufficientBalance` | Charge failed due to insufficient prepaid balance. |
 
 ---
 
@@ -197,15 +197,49 @@ From `contracts/subscription_vault/src/types.rs`:
 ### Insufficient balance then recover
 
 1. Create → Active; deposit some funds.
-2. Admin: `charge_subscription` (or interval elapses and batch runs) → balance too low → subscription moves to **InsufficientBalance**, call returns `Error::InsufficientBalance` (1003).
-3. Subscriber: `deposit_funds` → balance increased, status still InsufficientBalance.
-4. Subscriber: `resume_subscription` → status **Active**.
-5. Admin: `charge_subscription` (when interval elapsed) → charge succeeds.
+2. Admin: `charge_subscription` (or `batch_charge`) → balance too low → call returns `Error::InsufficientBalance` (1003) without committing extra failure-path state.
+3. Subscriber: `deposit_funds` → balance increased.
+4. Admin: a later charge with sufficient prepaid balance succeeds.
 
 ### Pause and resume
 
 1. Subscription is Active. Subscriber or merchant: `pause_subscription` → **Paused**.
 2. Later: same or other party: `resume_subscription` → **Active**. Alternatively: `cancel_subscription` from Paused → **Cancelled**.
+
+---
+
+## Golden Path Test Expectations
+
+The end-to-end fixture coverage for maintainers lives in:
+
+- `test_billing_lifecycle_golden_path_end_to_end`
+- `test_billing_lifecycle_delayed_charge_and_min_topup_progression`
+
+The native Soroban test harness assertions focus on balances, statuses, timestamps, withdrawals, and statement history. The vault event expectations below are documented for reviewer and indexer verification alongside those state assertions.
+
+These tests use the shared fixture constants from `contracts/subscription_vault/src/test.rs`:
+
+- `AMOUNT = 10_000_000` (10 USDC)
+- `PREPAID = 50_000_000` (50 USDC)
+- `INTERVAL = 30 days`
+- `min_topup = 1_000_000` (1 USDC)
+
+### Expected outputs: full golden path
+
+1. After `create_subscription`: status is **Active**, `prepaid_balance = 0`, merchant balance is `0`, and the vault has emitted one `created` event.
+2. After `deposit_funds(PREPAID)`: subscription balance is `50_000_000`, subscriber wallet is debited by the same amount, vault token balance becomes `50_000_000`, and one `deposited` event is visible from the vault contract.
+3. After two successful interval charges: status remains **Active**, `prepaid_balance = 30_000_000`, `lifetime_charged = 20_000_000`, merchant balance becomes `20_000_000`, and the vault has emitted two `charged` events.
+4. Statement reads must show two immutable rows with monotonic sequences `0` and `1`. Newest-first reads return sequence `1` first; cursor pagination returns `next_cursor = Some(0)` for the first page and `None` for the second.
+5. After `withdraw_merchant_funds(20_000_000)`: merchant internal balance is `0`, merchant wallet receives `20_000_000`, vault token balance falls to `30_000_000`, and one `withdrawn` event is emitted by the vault.
+6. After cancel plus subscriber refund: status is **Cancelled**, remaining prepaid balance is withdrawn back to the subscriber, and vault token balance returns to `0`.
+
+### Expected outputs: delayed charge plus minimum top-up progression
+
+1. Start with a `19_000_000` deposit. A delayed first charge at `T0 + 2 * INTERVAL + 77` still charges only one interval, leaving `prepaid_balance = 9_000_000`, `lifetime_charged = 10_000_000`, and merchant balance `10_000_000`.
+2. A follow-up deposit of exactly `1_000_000` satisfies the configured minimum top-up and restores the prepaid balance to exactly one interval (`10_000_000`).
+3. The next on-time charge reduces prepaid balance to `0`, raises merchant balance to `20_000_000`, and leaves two statement rows whose period boundaries reflect the actual delayed charge timestamp.
+
+These expectations are intended to make reviews fast: if a future change alters one of the balances, statement sequences, cursor behavior, or vault-emitted event counts above, the golden-path tests should fail and prompt a lifecycle review.
 
 ---
 
