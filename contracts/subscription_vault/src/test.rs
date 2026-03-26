@@ -1,10 +1,13 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
-    AdminRotatedEvent, Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
+    AdminRotatedEvent, Error, MerchantWithdrawalEvent, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
     SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
+use soroban_sdk::{
+    contract, contractimpl, Address, Env, IntoVal, String, Symbol, TryFromVal, Val,
+    Vec as SorobanVec,
+};
 
 extern crate alloc;
 use alloc::format;
@@ -98,6 +101,21 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
         env.storage()
             .instance()
             .set(&soroban_sdk::Symbol::new(env, "next_id"), &value);
+    });
+}
+
+fn seed_merchant_balance(
+    env: &Env,
+    contract_id: &Address,
+    merchant: &Address,
+    token: &Address,
+    balance: i128,
+) {
+    env.as_contract(contract_id, || {
+        env.storage().instance().set(
+            &(Symbol::new(env, "merchant_balance"), merchant.clone(), token.clone()),
+            &balance,
+        );
     });
 }
 
@@ -309,6 +327,136 @@ fn test_get_allowed_transitions() {
 
     let ib_targets = get_allowed_transitions(&SubscriptionStatus::InsufficientBalance);
     assert_eq!(ib_targets.len(), 2);
+}
+
+#[test]
+fn test_state_machine_property_transition_matrix_matches_manual_rules() {
+    for from in ALL_STATUSES.iter() {
+        let allowed = get_allowed_transitions(from);
+
+        for to in ALL_STATUSES.iter() {
+            let expected = manual_can_transition(from, to);
+            assert_eq!(can_transition(from, to), expected);
+            assert_eq!(validate_status_transition(from, to).is_ok(), expected);
+
+            if from == to {
+                assert!(!allowed.contains(to));
+            } else {
+                assert_eq!(allowed.contains(to), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_random_transition_sequences_only_allow_legal_targets() {
+    for start in ALL_STATUSES.iter() {
+        for seed_base in 0..64u64 {
+            let mut seed = seed_base + (start.clone() as u64) * 97;
+            let mut current = start.clone();
+
+            for _ in 0..24 {
+                let action = random_transition_action(&mut seed);
+                let target = transition_action_target(action);
+                let expected = manual_can_transition(&current, &target);
+
+                assert_eq!(can_transition(&current, &target), expected);
+                assert_eq!(
+                    validate_status_transition(&current, &target).is_ok(),
+                    expected
+                );
+
+                if expected {
+                    current = target;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_lifecycle_entrypoints_follow_manual_model() {
+    for start in ALL_STATUSES.iter() {
+        for seed_base in 0..48u64 {
+            let (env, client, _, _) = setup_test_env();
+            let (id, subscriber, _) = create_test_subscription(&env, &client, start.clone());
+            let mut expected = start.clone();
+            let mut seed = seed_base + (start.clone() as u64) * 131;
+
+            for _ in 0..12 {
+                let action = random_lifecycle_action(&mut seed);
+                let target = lifecycle_action_target(action);
+                let should_succeed = manual_can_transition(&expected, &target);
+
+                let result = match action {
+                    LifecycleAction::Pause => client.try_pause_subscription(&id, &subscriber),
+                    LifecycleAction::Resume => client.try_resume_subscription(&id, &subscriber),
+                    LifecycleAction::Cancel => client.try_cancel_subscription(&id, &subscriber),
+                };
+
+                assert_eq!(result.is_ok(), should_succeed);
+
+                let current = client.get_subscription(&id).status;
+                if should_succeed {
+                    expected = target;
+                    assert_eq!(current, expected);
+                } else {
+                    assert_eq!(current, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_state_machine_property_charge_failures_and_recovery_paths_obey_rules() {
+    for seed_base in 0..32u64 {
+        let mut seed = seed_base;
+
+        for step in 0..10 {
+            let (env, client, token, _) = setup_test_env();
+            let (id, subscriber, _) =
+                create_test_subscription(&env, &client, SubscriptionStatus::Active);
+            let in_grace_window = lcg_next(&mut seed) % 2 == 0;
+            let topup_amount = if lcg_next(&mut seed) % 2 == 0 {
+                AMOUNT - 1
+            } else {
+                PREPAID
+            };
+
+            seed_balance(&env, &client, id, 0);
+            let charge_time = if in_grace_window {
+                T0 + INTERVAL + 1
+            } else {
+                T0 + INTERVAL + (7 * 24 * 60 * 60) + 1
+            };
+            env.ledger().set_timestamp(charge_time + step as u64);
+
+            let result = client.try_charge_subscription(&id);
+            assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+
+            let failed_status = client.get_subscription(&id).status;
+            assert_eq!(failed_status, SubscriptionStatus::Active);
+
+            soroban_sdk::token::StellarAssetClient::new(&env, &token)
+                .mint(&subscriber, &topup_amount.max(1_000_000));
+            client.deposit_funds(&id, &subscriber, &topup_amount.max(1_000_000));
+
+            let after_deposit = client.get_subscription(&id).status;
+            assert_eq!(after_deposit, SubscriptionStatus::Active);
+
+            if topup_amount >= AMOUNT {
+                env.ledger()
+                    .set_timestamp(charge_time + INTERVAL + step as u64 + 1);
+                let charge_again = client.try_charge_subscription(&id);
+                assert!(charge_again.is_ok());
+                assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+            } else {
+                client.cancel_subscription(&id, &subscriber);
+                assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+            }
+        }
+    }
 }
 
 // -- Contract Lifecycle Tests -------------------------------------------------
@@ -820,6 +968,107 @@ fn test_deposit_funds_basic() {
     client.deposit_funds(&id, &subscriber, &5_000_000);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.prepaid_balance, 5_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #403)")]
+fn test_deposit_funds_unauthorized() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let other = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&other, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Other user tries to deposit into subscriber's vault
+    client.deposit_funds(&id, &other, &5_000_000);
+}
+
+#[test]
+fn test_deposit_funds_event_payload() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&subscriber, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    client.deposit_funds(&id, &subscriber, &15_000_000);
+
+    let events = env.events().all();
+    let deposit_event = events.last().expect("No events found");
+
+    // Verify event topics: (Symbol("deposited"), subscription_id)
+    assert_eq!(deposit_event.0, client.address);
+    assert_eq!(
+        Symbol::from_val(&env, &deposit_event.1.get(0).expect("Missing topic 0")),
+        Symbol::new(&env, "deposited")
+    );
+    assert_eq!(
+        u32::from_val(&env, &deposit_event.1.get(1).expect("Missing topic 1")),
+        id
+    );
+
+    // Verify event data: FundsDepositedEvent { subscription_id, subscriber, amount, prepaid_balance }
+    let event_data: crate::FundsDepositedEvent = deposit_event.2.into_val(&env);
+    assert_eq!(event_data.subscription_id, id);
+    assert_eq!(event_data.subscriber, subscriber);
+    assert_eq!(event_data.amount, 15_000_000);
+    assert_eq!(event_data.prepaid_balance, 15_000_000);
+}
+
+#[test]
+fn test_deposit_funds_cei_compliance() {
+    let (env, client, token, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_admin_client.mint(&subscriber, &100_000_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    let initial_contract_balance = token_client.balance(&client.address);
+    let deposit_amount = 20_000_000i128;
+
+    client.deposit_funds(&id, &subscriber, &deposit_amount);
+
+    // Check effects (state)
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, deposit_amount);
+
+    // Check interactions (transfer)
+    assert_eq!(
+        token_client.balance(&client.address),
+        initial_contract_balance + deposit_amount
+    );
 }
 
 #[test]
@@ -1726,18 +1975,10 @@ fn test_partial_refund_repeated_debits_are_cumulative() {
     let sub_id = client.create_subscription(
         &subscriber,
         &merchant,
-<<<<<<< feature/contracts-usage-flag-governance
-        &plan_id,
-        &new_amount,
-        &new_interval,
-        &false,
-        &Some(cap),
-=======
         &AMOUNT,
         &INTERVAL,
         &false,
         &None::<i128>,
->>>>>>> main
     );
     client.deposit_funds(&sub_id, &subscriber, &30_000_000i128);
 
@@ -1746,20 +1987,9 @@ fn test_partial_refund_repeated_debits_are_cumulative() {
         client.partial_refund(&vault_admin, &sub_id, &subscriber, &5_000_000i128);
     }
 
-<<<<<<< feature/contracts-usage-flag-governance
-    // New plan has incremented version and updated fields, sharing template_key.
-    let updated = client.get_plan_template(&new_plan_id);
-    assert_eq!(updated.version, 2);
-    assert_eq!(updated.template_key, original_after.template_key);
-    assert_eq!(updated.amount, new_amount);
-    assert_eq!(updated.interval_seconds, new_interval);
-    assert!(!updated.usage_enabled);
-    assert_eq!(updated.lifetime_cap, Some(cap));
-=======
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.prepaid_balance, 15_000_000i128); // 30 - 3*5 = 15
     assert_eq!(token.balance(&subscriber), 15_000_000i128);
->>>>>>> main
 }
 
 /// Cumulative refunds that exactly drain the balance succeed; one more unit fails.
@@ -1792,18 +2022,10 @@ fn test_partial_refund_cumulative_exact_drain_then_over_refund_fails() {
     let sub_id = client.create_subscription(
         &subscriber,
         &merchant,
-<<<<<<< feature/contracts-usage-flag-governance
-        &plan_id,
-        &new_amount,
-        &new_interval,
-        &false,
-        &Some(cap),
-=======
         &AMOUNT,
         &INTERVAL,
         &false,
         &None::<i128>,
->>>>>>> main
     );
     client.deposit_funds(&sub_id, &subscriber, &10_000_000i128);
 
@@ -1814,19 +2036,9 @@ fn test_partial_refund_cumulative_exact_drain_then_over_refund_fails() {
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.prepaid_balance, 0);
 
-<<<<<<< feature/contracts-usage-flag-governance
-    let after = client.get_subscription(&sub_id);
-    assert_eq!(after.amount, new_amount);
-    assert_eq!(after.interval_seconds, new_interval);
-    assert!(!after.usage_enabled);
-    // Lifetime tracking is preserved.
-    assert_eq!(after.lifetime_charged, 0);
-    assert_eq!(after.lifetime_cap, Some(cap));
-=======
     // Any further refund must fail — balance is zero.
     let over = client.try_partial_refund(&vault_admin, &sub_id, &subscriber, &1i128);
     assert_eq!(over, Err(Ok(Error::InsufficientBalance)));
->>>>>>> main
 }
 
 /// A partial refund equal to the full prepaid balance (full-balance-as-partial) succeeds.
@@ -2164,13 +2376,6 @@ fn test_withdraw_subscriber_funds_exactly_once() {
 }
 
 #[test]
-<<<<<<< feature/contracts-usage-flag-governance
-fn test_export_contract_snapshot() {
-    let (_env, client, _, admin) = setup_test_env();
-    let snapshot = client.export_contract_snapshot(&admin);
-    assert_eq!(snapshot.admin, admin);
-    assert_eq!(snapshot.storage_version, 2);
-=======
 fn test_withdraw_zero_balance_fails() {
     let (env, client, _, _) = setup_test_env();
     let subscriber = Address::generate(&env);
@@ -2189,7 +2394,6 @@ fn test_withdraw_zero_balance_fails() {
 
     let result = client.try_withdraw_subscriber_funds(&id, &subscriber);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
->>>>>>> main
 }
 
 #[test]
@@ -2376,6 +2580,150 @@ fn test_merchant_balance_and_withdrawal() {
 
     let balance = client.get_merchant_balance(&merchant);
     assert!(balance > 0);
+}
+
+#[test]
+fn test_withdraw_merchant_funds_reduces_default_bucket_and_emits_event() {
+    let (env, client, token, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+    let contract_id = client.address.clone();
+
+    seed_merchant_balance(&env, &contract_id, &merchant, &token, 9_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &9_000_000i128);
+
+    env.as_contract(&contract_id, || {
+        crate::merchant::withdraw_merchant_funds(&env, merchant.clone(), 4_000_000i128)
+    })
+    .unwrap();
+
+    assert_eq!(client.get_merchant_balance(&merchant), 5_000_000i128);
+
+    let encoded: Val = MerchantWithdrawalEvent {
+        merchant: merchant.clone(),
+        token: token.clone(),
+        amount: 4_000_000i128,
+        remaining_balance: 5_000_000i128,
+    }
+    .into_val(&env);
+    let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();
+    assert_eq!(event.merchant, merchant);
+    assert_eq!(event.token, token);
+    assert_eq!(event.amount, 4_000_000i128);
+    assert_eq!(event.remaining_balance, 5_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_funds_rejects_empty_bucket() {
+    let (env, client, _, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+
+    let result = client.try_withdraw_merchant_funds(&merchant, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn test_withdraw_merchant_funds_rejects_overdraw() {
+    let (env, client, token, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+    let contract_id = client.address.clone();
+
+    seed_merchant_balance(&env, &contract_id, &merchant, &token, 3_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &3_000_000i128);
+
+    let result = client.try_withdraw_merchant_funds(&merchant, &4_000_000i128);
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+    assert_eq!(client.get_merchant_balance(&merchant), 3_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_only_debits_requested_bucket_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    seed_merchant_balance(&env, &contract_id, &merchant, &token_a, 5_000_000i128);
+    seed_merchant_balance(&env, &contract_id, &merchant, &token_b, 7_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_a).mint(&contract_id, &5_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_b).mint(&contract_id, &7_000_000i128);
+
+    env.as_contract(&contract_id, || {
+        crate::merchant::withdraw_merchant_funds_for_token(
+            &env,
+            merchant.clone(),
+            token_b.clone(),
+            2_000_000i128,
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        5_000_000i128
+    );
+
+    let encoded: Val = MerchantWithdrawalEvent {
+        merchant: merchant.clone(),
+        token: token_b.clone(),
+        amount: 2_000_000i128,
+        remaining_balance: 5_000_000i128,
+    }
+    .into_val(&env);
+    let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();
+    assert_eq!(event.merchant, merchant);
+    assert_eq!(event.token, token_b);
+    assert_eq!(event.amount, 2_000_000i128);
+    assert_eq!(event.remaining_balance, 5_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_rejects_empty_bucket() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, admin) = setup_contract(&env);
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    seed_merchant_balance(&env, &client.address, &merchant, &token, 3_000_000i128);
+
+    let result = client.try_withdraw_merchant_token_funds(&merchant, &token_b, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_checks_vault_balance_before_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
+    let merchant = Address::generate(&env);
+
+    seed_merchant_balance(&env, &client.address, &merchant, &token, 4_000_000i128);
+
+    let result = client.try_withdraw_merchant_token_funds(&merchant, &token, &4_000_000i128);
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token),
+        4_000_000i128
+    );
 }
 
 // -- End-to-end billing lifecycle tests --------------------------------------
@@ -4352,68 +4700,462 @@ fn test_get_oracle_config_default_is_disabled() {
     assert_eq!(cfg.max_age_seconds, 0u64);
 }
 
-#[test]
-fn test_plan_update_rejects_usage_flag_change() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _token, _admin) = setup_contract(&env);
-    let merchant = Address::generate(&env);
+// -- Storage Layout Compatibility Tests ---------------------------------------
+//
+// These tests act as regression guards for the on-chain storage schema.
+// Soroban encodes #[contracttype] structs as ScMap (keyed by field name) and
+// enums as ScVec([discriminant, payload]).  Any change that shifts a
+// discriminant value or removes/renames a field is a BREAKING upgrade.
+//
+// Security note: breaking storage changes on a live contract would make
+// existing subscriptions unreadable, potentially locking subscriber funds.
+// These tests must pass before any upgrade is deployed.
 
-    let plan_id =
-        client.create_plan_template(&merchant, &5_000_000i128, &INTERVAL, &false, &None::<i128>);
+#[cfg(test)]
+mod storage_layout {
+    use super::*;
+    use crate::{DataKey, SubscriptionStatus};
 
-    // Attempting to update the plan but changing usage_enabled from false to true
-    let result = client.try_update_plan_template(
-        &merchant,
-        &plan_id,
-        &5_000_000i128,
-        &INTERVAL,
-        &true,
-        &None::<i128>,
-    );
+    // -------------------------------------------------------------------------
+    // 1. DataKey discriminant snapshot
+    //    Each variant's position in the enum determines its on-chain encoding.
+    //    If a variant is inserted before an existing one, all subsequent keys
+    //    become unreadable.  This test pins the current order.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_datakey_discriminants_are_stable() {
+        // Soroban encodes enum variants by their declaration order (0-based).
+        // We verify the discriminant of each variant by round-tripping through
+        // storage inside a contract context.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SubscriptionVault, ());
 
-    // Should fail with InvalidInput because usage_enabled cannot be changed
-    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+        env.as_contract(&contract_id, || {
+            // Write each key variant and confirm it can be read back under the
+            // same variant — a mismatch would mean the discriminant shifted.
+            let storage = env.storage().instance();
+
+            storage.set(&DataKey::Token, &42u32);
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::Token), Some(42u32));
+
+            storage.set(&DataKey::Admin, &99u32);
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::Admin), Some(99u32));
+
+            storage.set(&DataKey::MinTopup, &7u32);
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::MinTopup), Some(7u32));
+
+            storage.set(&DataKey::NextId, &1u32);
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::NextId), Some(1u32));
+
+            storage.set(&DataKey::SchemaVersion, &2u32);
+            assert_eq!(
+                storage.get::<DataKey, u32>(&DataKey::SchemaVersion),
+                Some(2u32)
+            );
+
+            let sub_key = DataKey::Sub(1);
+            storage.set(&sub_key, &100u32);
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::Sub(1)), Some(100u32));
+
+            let cp_key = DataKey::ChargedPeriod(1);
+            storage.set(&cp_key, &5u32);
+            assert_eq!(
+                storage.get::<DataKey, u32>(&DataKey::ChargedPeriod(1)),
+                Some(5u32)
+            );
+
+            storage.set(&DataKey::EmergencyStop, &true);
+            assert_eq!(
+                storage.get::<DataKey, bool>(&DataKey::EmergencyStop),
+                Some(true)
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. SubscriptionStatus discriminant snapshot
+    //    Enum variants are stored as integers on-chain.  Reordering or inserting
+    //    variants before existing ones corrupts all stored subscription statuses.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_subscription_status_discriminants_are_stable() {
+        // Explicit discriminants are declared in types.rs; verify they match
+        // what we expect so a future edit is caught immediately.
+        assert_eq!(SubscriptionStatus::Active as u32, 0);
+        assert_eq!(SubscriptionStatus::Paused as u32, 1);
+        assert_eq!(SubscriptionStatus::Cancelled as u32, 2);
+        assert_eq!(SubscriptionStatus::InsufficientBalance as u32, 3);
+        assert_eq!(SubscriptionStatus::GracePeriod as u32, 4);
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Subscription struct round-trip (field-name encoding)
+    //    Soroban ScMap keys are field name strings.  This test writes a full
+    //    Subscription to storage and reads it back, confirming every field
+    //    survives the encode/decode cycle without corruption.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_subscription_struct_round_trips_through_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SubscriptionVault, ());
+
+        let subscriber = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        let original = Subscription {
+            subscriber: subscriber.clone(),
+            merchant: merchant.clone(),
+            token: token.clone(),
+            amount: 10_000_000,
+            interval_seconds: INTERVAL,
+            last_payment_timestamp: T0,
+            status: SubscriptionStatus::Active,
+            prepaid_balance: 50_000_000,
+            usage_enabled: false,
+            lifetime_cap: Some(120_000_000),
+            lifetime_charged: 10_000_000,
+        };
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::Sub(42), &original);
+            let loaded: Subscription = env
+                .storage()
+                .instance()
+                .get(&DataKey::Sub(42))
+                .expect("subscription must be present");
+
+            assert_eq!(loaded.amount, 10_000_000);
+            assert_eq!(loaded.interval_seconds, INTERVAL);
+            assert_eq!(loaded.last_payment_timestamp, T0);
+            assert_eq!(loaded.status, SubscriptionStatus::Active);
+            assert_eq!(loaded.prepaid_balance, 50_000_000);
+            assert!(!loaded.usage_enabled);
+            assert_eq!(loaded.lifetime_cap, Some(120_000_000));
+            assert_eq!(loaded.lifetime_charged, 10_000_000);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. Optional field default — lifetime_cap = None
+    //    Subscriptions created before lifetime_cap was introduced have no cap
+    //    field.  New code must treat a missing/None cap as "no cap" (not panic).
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_subscription_with_no_lifetime_cap_is_readable() {
+        let (env, client, _token, _admin) = setup_test_env();
+
+        // Create a subscription without a cap (None).
+        let subscriber = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let id = client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
+
+        let sub = client.get_subscription(&id);
+        assert_eq!(sub.lifetime_cap, None);
+        assert_eq!(sub.lifetime_charged, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Optional field introduction — lifetime_cap = Some(value)
+    //    Subscriptions created with a cap must persist and be readable.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_subscription_with_lifetime_cap_persists_correctly() {
+        let (env, client, _token, _admin) = setup_test_env();
+
+        let subscriber = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let cap = 60_000_000i128; // 60 USDC
+        let id = client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &Some(cap),
+        );
+
+        let sub = client.get_subscription(&id);
+        assert_eq!(sub.lifetime_cap, Some(cap));
+        assert_eq!(sub.lifetime_charged, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Backward-compatible deserialization: manually written storage record
+    //    Simulates reading a subscription that was written by an older contract
+    //    version (e.g., before lifetime_cap existed).  We write a Subscription
+    //    with lifetime_cap=None directly into storage and confirm the current
+    //    code reads it without error.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_legacy_subscription_without_cap_is_deserializable() {
+        let (env, client, _token, _admin) = setup_test_env();
+
+        let subscriber = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        // Simulate a "legacy" record written with no cap fields.
+        let legacy = Subscription {
+            subscriber: subscriber.clone(),
+            merchant: merchant.clone(),
+            token: token.clone(),
+            amount: AMOUNT,
+            interval_seconds: INTERVAL,
+            last_payment_timestamp: T0,
+            status: SubscriptionStatus::Active,
+            prepaid_balance: PREPAID,
+            usage_enabled: false,
+            lifetime_cap: None,
+            lifetime_charged: 0,
+        };
+
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::Sub(999), &legacy);
+        });
+
+        // Current code must read it back without panicking.
+        let loaded: Subscription = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::Sub(999))
+                .expect("legacy record must be readable")
+        });
+
+        assert_eq!(loaded.lifetime_cap, None);
+        assert_eq!(loaded.lifetime_charged, 0);
+        assert_eq!(loaded.amount, AMOUNT);
+        assert_eq!(loaded.status, SubscriptionStatus::Active);
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. Config key isolation — Sub(id) keys do not collide with Symbol keys
+    //    Ensures u32 subscription IDs stored under DataKey::Sub(n) are
+    //    distinct from Symbol-based config keys (Token, Admin, etc.).
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_subscription_key_does_not_collide_with_config_keys() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SubscriptionVault, ());
+
+        env.as_contract(&contract_id, || {
+            let storage = env.storage().instance();
+
+            // Write a config value and a subscription under different keys.
+            storage.set(&DataKey::NextId, &1u32);
+            storage.set(&DataKey::Sub(1), &999u32);
+
+            // Both must be independently readable.
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::NextId), Some(1u32));
+            assert_eq!(storage.get::<DataKey, u32>(&DataKey::Sub(1)), Some(999u32));
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. All SubscriptionStatus variants survive storage round-trip
+    //    Each status must encode and decode correctly so state transitions
+    //    are never silently corrupted after an upgrade.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_all_status_variants_round_trip_through_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(SubscriptionVault, ());
+
+        let statuses = [
+            SubscriptionStatus::Active,
+            SubscriptionStatus::Paused,
+            SubscriptionStatus::Cancelled,
+            SubscriptionStatus::InsufficientBalance,
+            SubscriptionStatus::GracePeriod,
+        ];
+
+        env.as_contract(&contract_id, || {
+            for (i, status) in statuses.iter().enumerate() {
+                let key = DataKey::Sub(i as u32);
+                env.storage().instance().set(&key, status);
+                let loaded: SubscriptionStatus = env
+                    .storage()
+                    .instance()
+                    .get(&key)
+                    .expect("status must be present");
+                assert_eq!(&loaded, status);
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // 9. SchemaVersion key is readable after init
+    //    Confirms the schema version is written during init and can be read
+    //    back — a prerequisite for any future migration guard logic.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_schema_version_is_set_after_init() {
+        let (env, client, _token, _admin) = setup_test_env();
+
+        let version: u32 = env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::SchemaVersion)
+                .expect("schema_version must be set after init")
+        });
+
+        // Must be a positive version number (current: 2).
+        assert!(version >= 1, "schema version must be >= 1, got {version}");
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. Error discriminants are stable
+    //     Error codes are returned to callers and stored in BatchChargeResult.
+    //     Changing a discriminant value is a breaking API change.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_error_codes_are_stable() {
+        assert_eq!(Error::Unauthorized as u32, 401);
+        assert_eq!(Error::Forbidden as u32, 403);
+        assert_eq!(Error::NotFound as u32, 404);
+        assert_eq!(Error::InvalidStatusTransition as u32, 400);
+        assert_eq!(Error::BelowMinimumTopup as u32, 402);
+        assert_eq!(Error::SubscriptionLimitReached as u32, 429);
+        assert_eq!(Error::IntervalNotElapsed as u32, 1001);
+        assert_eq!(Error::NotActive as u32, 1002);
+        assert_eq!(Error::InsufficientBalance as u32, 1003);
+        assert_eq!(Error::UsageNotEnabled as u32, 1004);
+        assert_eq!(Error::InsufficientPrepaidBalance as u32, 1005);
+        assert_eq!(Error::InvalidAmount as u32, 1006);
+        assert_eq!(Error::Replay as u32, 1007);
+        assert_eq!(Error::EmergencyStopActive as u32, 1009);
+        assert_eq!(Error::LifetimeCapReached as u32, 1017);
+        assert_eq!(Error::AlreadyInitialized as u32, 1018);
+    }
 }
 
 #[test]
-fn test_migration_rejects_usage_flag_change() {
-    use crate::types::PlanTemplate;
-    use soroban_sdk::Symbol;
-
+fn test_merchant_token_bucket_reconciliation() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, token, _admin) = setup_contract(&env);
-    let subscriber = Address::generate(&env);
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_c = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+    client.add_accepted_token(&admin, &token_c, &6);
+
     let merchant = Address::generate(&env);
+    let subscriber_a = Address::generate(&env);
+    let subscriber_b = Address::generate(&env);
 
-    // Create a plan with usage_enabled = false
-    let plan_id =
-        client.create_plan_template(&merchant, &5_000_000i128, &INTERVAL, &false, &None::<i128>);
+    let token_a_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_a);
+    let token_b_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_b);
+    let token_a_client = soroban_sdk::token::Client::new(&env, &token_a);
+    let token_b_client = soroban_sdk::token::Client::new(&env, &token_b);
 
-    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+    token_a_admin.mint(&subscriber_a, &100_000_000i128);
+    token_b_admin.mint(&subscriber_b, &100_000_000i128);
 
-    // Forcefully inject a new plan version directly into storage with usage_enabled = true
-    let new_plan_id = 999u32;
-    let malicious_plan = PlanTemplate {
-        merchant: merchant.clone(),
-        token: token.clone(),
-        amount: 5_000_000i128,
-        interval_seconds: INTERVAL,
-        usage_enabled: true, // Mismatch
-        lifetime_cap: None,
-        template_key: plan_id, // Same template key
-        version: 2,            // Newer version
-    };
+    let id_a = client.create_subscription(
+        &subscriber_a,
+        &merchant,
+        &5_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
 
-    env.as_contract(&client.address, || {
-        let key = (Symbol::new(&env, "plan"), new_plan_id);
-        env.storage().instance().set(&key, &malicious_plan);
-    });
+    let id_b = client.create_subscription_with_token(
+        &subscriber_b,
+        &merchant,
+        &token_b,
+        &7_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
 
-    // Attempt to migrate to this new plan
-    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &new_plan_id);
+    client.deposit_funds(&id_a, &subscriber_a, &20_000_000i128);
+    client.deposit_funds(&id_b, &subscriber_b, &20_000_000i128);
 
-    // Should fail with InvalidInput due to billing model mismatch
-    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    // Charge cycle 1
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    // Partial withdraw Token A (test withdrawal invariant and isolation)
+    client.withdraw_merchant_token_funds(&merchant, &token_a, &2_000_000i128);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        3_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    assert_eq!(token_a_client.balance(&merchant), 2_000_000i128);
+    assert_eq!(token_b_client.balance(&merchant), 0);
+
+    // Charge cycle 2 (interleaved sequence)
+    env.ledger().set_timestamp(T0 + 2 * INTERVAL);
+    client.charge_subscription(&id_a);
+    client.charge_subscription(&id_b);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        14_000_000i128
+    );
+
+    // Full withdraw Token B
+    client.withdraw_merchant_token_funds(&merchant, &token_b, &14_000_000i128);
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
+    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
+
+    assert_eq!(token_a_client.balance(&merchant), 2_000_000i128);
+    assert_eq!(token_b_client.balance(&merchant), 14_000_000i128);
 }

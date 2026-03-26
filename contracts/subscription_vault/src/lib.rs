@@ -37,10 +37,11 @@ pub use types::{
     BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
     BillingStatementAggregate, BillingStatementsPage, CapInfo, ContractSnapshot, DataKey,
     EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent, MetadataSetEvent,
-    MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
-    PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
-    Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
+    LifetimeCapReachedEvent, MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent,
+    MetadataDeletedEvent, MetadataSetEvent, MigrationExportEvent, NextChargeInfo,
+    OneOffChargedEvent, OracleConfig, OraclePrice, PartialRefundEvent, PlanTemplate,
+    PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason, Subscription,
+    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
     SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
     MAX_METADATA_VALUE_LENGTH,
@@ -662,6 +663,21 @@ impl SubscriptionVault {
     /// Token-scoped merchant balance.
     pub fn get_merchant_balance_by_token(env: Env, merchant: Address, token: Address) -> i128 {
         merchant::get_merchant_balance_by_token(&env, &merchant, &token)
+    }
+
+    /// Check if a merchant has enabled a blanket pause.
+    pub fn get_merchant_paused(env: Env, merchant: Address) -> bool {
+        merchant::get_merchant_paused(&env, merchant)
+    }
+
+    /// Enable a blanket pause for all of the merchant's subscriptions.
+    pub fn pause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::pause_merchant(&env, merchant)
+    }
+
+    /// Disable a blanket pause for the merchant's subscriptions.
+    pub fn unpause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::unpause_merchant(&env, merchant)
     }
 
     // ── Queries ──────────────────────────────────────────────────────────────

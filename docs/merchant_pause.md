@@ -61,6 +61,14 @@ When a charge is attempted:
 3. If subscription status is not Active/GracePeriod → `Error::NotActive`
 4. Otherwise → proceed with charge
 
+## Conflict Resolution and Cross-Actor Rules
+
+Merchant-wide pause is orthogonal to individual subscription status. This leads to the following rules:
+
+- **Independent State**: If a merchant pauses their service, individual subscriptions retain their `Active`, `Paused`, or `InsufficientBalance` status.
+- **Preference Preservation**: If a subscriber manually pauses their subscription while the merchant is already paused, and the merchant later unpauses, the subscription remains `Paused`. Individual subscriber preference is always preserved.
+- **Terminal State**: Subscribers and merchants can always `cancel_subscription` regardless of the blanket merchant pause state.
+- **Authorization**: All lifecycle changes (`pause_subscription`, `resume_subscription`, `cancel_subscription`) require authorization from either the subscriber or the merchant (actor attribution).
 ## Events
 
 ### MerchantPausedEvent

@@ -325,6 +325,10 @@ pub fn do_deposit_funds(
     validate_non_negative(amount)?;
 
     let mut sub = get_subscription(env, subscription_id)?;
+    if subscriber != sub.subscriber {
+        return Err(Error::Forbidden);
+    }
+
     let token_addr = sub.token.clone();
 
     // Enforce credit limit for additional prepaid balance being loaded.
@@ -340,7 +344,12 @@ pub fn do_deposit_funds(
 
     env.events().publish(
         (Symbol::new(env, "deposited"), subscription_id),
-        (subscriber, amount, sub.prepaid_balance),
+        FundsDepositedEvent {
+            subscription_id,
+            subscriber,
+            amount,
+            prepaid_balance: sub.prepaid_balance,
+        },
     );
     Ok(())
 }

@@ -40,6 +40,12 @@ pub fn charge_one(
     idempotency_key: Option<soroban_sdk::BytesN<32>>,
 ) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+    let merchant = sub.merchant.clone();
+
+    if crate::merchant::get_merchant_paused(env, merchant.clone()) {
+        return Err(Error::MerchantPaused);
+    }
+
     let charge_amount = crate::oracle::resolve_charge_amount(env, &sub)?;
 
     if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
@@ -200,6 +206,11 @@ pub fn charge_one(
 /// Debit a metered `usage_amount` from a subscription's prepaid balance.
 pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
+    let merchant = sub.merchant.clone();
+
+    if crate::merchant::get_merchant_paused(env, merchant.clone()) {
+        return Err(Error::MerchantPaused);
+    }
 
     if sub.status != SubscriptionStatus::Active {
         return Err(Error::NotActive);

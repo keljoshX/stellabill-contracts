@@ -116,6 +116,26 @@ pub fn cancel_subscription(...) -> Result<(), Error> {
 }
 ```
 
+## Property Test Model
+
+The test suite includes deterministic property-style checks that validate the state machine under
+arbitrary action sequences without adding extra dependencies.
+
+Model assumptions:
+
+- The transition rules are defined independently in the tests as a manual adjacency model.
+- Property tests compare the manual model against:
+  - `validate_status_transition`
+  - `can_transition`
+  - `get_allowed_transitions`
+  - lifecycle entrypoints `pause_subscription`, `resume_subscription`, and `cancel_subscription`
+- Charge failure paths are also sampled to verify:
+  - helper-level rules only allow `Active -> GracePeriod` and `Active -> InsufficientBalance`
+  - failed public `charge_subscription` calls do not persist an illegal stored status change
+  - recovery flows remain constrained to allowed lifecycle actions
+
+These tests are pseudo-random but reproducible because they use a fixed deterministic generator.
+
 ## Examples
 
 ### Example 1: Normal Lifecycle

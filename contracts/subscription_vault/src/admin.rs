@@ -42,7 +42,7 @@ pub fn do_init(
     instance.set(&Symbol::new(env, "admin"), &admin);
     instance.set(&Symbol::new(env, "min_topup"), &min_topup);
     instance.set(&Symbol::new(env, "grace_period"), &grace_period);
-
+    instance.set(&DataKey::SchemaVersion, &1u32);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
         (token, admin, min_topup, grace_period),
