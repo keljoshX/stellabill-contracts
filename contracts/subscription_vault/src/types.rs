@@ -612,7 +612,9 @@ pub struct SubscriptionResumedEvent {
 #[derive(Clone, Debug)]
 pub struct MerchantWithdrawalEvent {
     pub merchant: Address,
+    pub token: Address,
     pub amount: i128,
+    pub remaining_balance: i128,
 }
 
 /// Event emitted when a subscriber withdraws funds after cancellation.

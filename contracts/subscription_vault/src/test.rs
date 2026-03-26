@@ -1,10 +1,13 @@
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
-    AdminRotatedEvent, Error, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
+    AdminRotatedEvent, Error, MerchantWithdrawalEvent, OraclePrice, RecoveryReason, Subscription, SubscriptionStatus,
     SubscriptionVault, SubscriptionVaultClient, MAX_SUBSCRIPTION_ID,
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec as SorobanVec};
+use soroban_sdk::{
+    contract, contractimpl, Address, Env, IntoVal, String, Symbol, TryFromVal, Val,
+    Vec as SorobanVec,
+};
 
 extern crate alloc;
 use alloc::format;
@@ -98,6 +101,21 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
         env.storage()
             .instance()
             .set(&soroban_sdk::Symbol::new(env, "next_id"), &value);
+    });
+}
+
+fn seed_merchant_balance(
+    env: &Env,
+    contract_id: &Address,
+    merchant: &Address,
+    token: &Address,
+    balance: i128,
+) {
+    env.as_contract(contract_id, || {
+        env.storage().instance().set(
+            &(Symbol::new(env, "merchant_balance"), merchant.clone(), token.clone()),
+            &balance,
+        );
     });
 }
 
@@ -2331,6 +2349,150 @@ fn test_merchant_balance_and_withdrawal() {
 
     let balance = client.get_merchant_balance(&merchant);
     assert!(balance > 0);
+}
+
+#[test]
+fn test_withdraw_merchant_funds_reduces_default_bucket_and_emits_event() {
+    let (env, client, token, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+    let contract_id = client.address.clone();
+
+    seed_merchant_balance(&env, &contract_id, &merchant, &token, 9_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &9_000_000i128);
+
+    env.as_contract(&contract_id, || {
+        crate::merchant::withdraw_merchant_funds(&env, merchant.clone(), 4_000_000i128)
+    })
+    .unwrap();
+
+    assert_eq!(client.get_merchant_balance(&merchant), 5_000_000i128);
+
+    let encoded: Val = MerchantWithdrawalEvent {
+        merchant: merchant.clone(),
+        token: token.clone(),
+        amount: 4_000_000i128,
+        remaining_balance: 5_000_000i128,
+    }
+    .into_val(&env);
+    let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();
+    assert_eq!(event.merchant, merchant);
+    assert_eq!(event.token, token);
+    assert_eq!(event.amount, 4_000_000i128);
+    assert_eq!(event.remaining_balance, 5_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_funds_rejects_empty_bucket() {
+    let (env, client, _, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+
+    let result = client.try_withdraw_merchant_funds(&merchant, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn test_withdraw_merchant_funds_rejects_overdraw() {
+    let (env, client, token, _) = setup_test_env();
+    let merchant = Address::generate(&env);
+    let contract_id = client.address.clone();
+
+    seed_merchant_balance(&env, &contract_id, &merchant, &token, 3_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&contract_id, &3_000_000i128);
+
+    let result = client.try_withdraw_merchant_funds(&merchant, &4_000_000i128);
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+    assert_eq!(client.get_merchant_balance(&merchant), 3_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_only_debits_requested_bucket_and_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    client.init(&token_a, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    seed_merchant_balance(&env, &contract_id, &merchant, &token_a, 5_000_000i128);
+    seed_merchant_balance(&env, &contract_id, &merchant, &token_b, 7_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_a).mint(&contract_id, &5_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_b).mint(&contract_id, &7_000_000i128);
+
+    env.as_contract(&contract_id, || {
+        crate::merchant::withdraw_merchant_funds_for_token(
+            &env,
+            merchant.clone(),
+            token_b.clone(),
+            2_000_000i128,
+        )
+    })
+    .unwrap();
+
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        5_000_000i128
+    );
+
+    let encoded: Val = MerchantWithdrawalEvent {
+        merchant: merchant.clone(),
+        token: token_b.clone(),
+        amount: 2_000_000i128,
+        remaining_balance: 5_000_000i128,
+    }
+    .into_val(&env);
+    let event = MerchantWithdrawalEvent::try_from_val(&env, &encoded).unwrap();
+    assert_eq!(event.merchant, merchant);
+    assert_eq!(event.token, token_b);
+    assert_eq!(event.amount, 2_000_000i128);
+    assert_eq!(event.remaining_balance, 5_000_000i128);
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_rejects_empty_bucket() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, admin) = setup_contract(&env);
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    client.add_accepted_token(&admin, &token_b, &6);
+
+    let merchant = Address::generate(&env);
+    seed_merchant_balance(&env, &client.address, &merchant, &token, 3_000_000i128);
+
+    let result = client.try_withdraw_merchant_token_funds(&merchant, &token_b, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn test_withdraw_merchant_token_funds_checks_vault_balance_before_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
+    let merchant = Address::generate(&env);
+
+    seed_merchant_balance(&env, &client.address, &merchant, &token, 4_000_000i128);
+
+    let result = client.try_withdraw_merchant_token_funds(&merchant, &token, &4_000_000i128);
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token),
+        4_000_000i128
+    );
 }
 
 // -- End-to-end billing lifecycle tests --------------------------------------
