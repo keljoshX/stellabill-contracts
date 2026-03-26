@@ -89,3 +89,34 @@ A `subscription_migrated` event is emitted with:
   - Use events and read‑only queries to reconcile which subscribers are on which
     template version.
 
+## Security Considerations
+
+**Key Safety Properties (enforced by `migrate_subscription_to_plan`):**
+
+| Property | Protection | Error Code |
+|----------|------------|------------|
+| Monotonic version progression | `new.version > current.version` | `InvalidInput` (#1015) |
+| Same template lineage | `template_key` match | `InvalidInput` (#1015) |
+| No token mismatches | Token address equality | `InvalidInput` (#1015) |
+| Compatible lifetime caps | `lifetime_charged ≤ new_cap` | `LifetimeCapReached` (#1017) |
+| No billing model changes | `usage_enabled` unchanged | `InvalidInput` (#1015) |
+| Subscriber opt-in only | Caller == `sub.subscriber` | `Forbidden` (#403) |
+
+**Attack Vectors Mitigated:**
+- **Downgrade attacks**: Cannot migrate to older `version`.
+- **Cross-plan confusion**: `template_key` pins lineage.
+- **Token drain**: Token pinned, cannot switch to attacker-controlled token.
+- **Cap bypass**: New cap cannot be smaller than existing `lifetime_charged`.
+- **Unauthorized migration**: Only subscription owner can migrate.
+- **Reentrancy**: Pure storage reads before any mutation; CEI-compliant.
+
+**Test Coverage:**
+Comprehensive unit tests cover all failure modes including same-version, downgrade, cap-exceeded, token-mismatch, non-plan subs.
+
+**Audit Notes:**
+- Gas bounded O(1), no loops.
+- No external calls in migration path.
+- Events logged for full auditability.
+- Backward compatible: existing subs unchanged.
+
+
