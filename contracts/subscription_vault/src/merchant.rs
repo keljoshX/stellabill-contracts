@@ -12,8 +12,8 @@
 //!
 //! See `docs/reentrancy.md` for details on the reentrancy threat model and mitigation.
 
-use crate::safe_math::validate_non_negative;
-use crate::types::Error;
+use crate::safe_math::{safe_sub_balance, validate_non_negative};
+use crate::types::{Error, MerchantConfig, MerchantWithdrawalEvent};
 use soroban_sdk::{token, Address, Env, Symbol};
 
 fn merchant_balance_key(
@@ -89,6 +89,9 @@ pub fn withdraw_merchant_funds_for_token(
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
+    if !crate::admin::is_token_accepted(env, &token_addr) {
+        return Err(Error::InvalidInput);
+    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // CHECKS: Validate all preconditions before any state mutations
@@ -101,21 +104,64 @@ pub fn withdraw_merchant_funds_for_token(
         return Err(Error::InsufficientBalance);
     }
 
-    let new_balance = current.checked_sub(amount).ok_or(Error::Overflow)?;
+    let token_client = token::Client::new(env, &token_addr);
+    let contract = env.current_contract_address();
+    let contract_balance = token_client.balance(&contract);
+    if contract_balance < amount {
+        return Err(Error::InsufficientBalance);
+    }
+
+    let new_balance = safe_sub_balance(current, amount)?;
 
     // ──────────────────────────────────────────────────────────────────────────
     // EFFECTS: Update internal state before external interactions (CEI pattern)
     // ──────────────────────────────────────────────────────────────────────────
     set_merchant_balance(env, &merchant, &token_addr, &new_balance);
-    env.events()
-        .publish((Symbol::new(env, "withdrawn"), merchant.clone()), amount);
+    env.events().publish(
+        (
+            Symbol::new(env, "withdrawn"),
+            merchant.clone(),
+            token_addr.clone(),
+        ),
+        MerchantWithdrawalEvent {
+            merchant: merchant.clone(),
+            token: token_addr.clone(),
+            amount,
+            remaining_balance: new_balance,
+        },
+    );
 
     // ──────────────────────────────────────────────────────────────────────────
     // INTERACTIONS: Only after internal state is consistent, call token contract
     // This ensures that even if token contract calls back, our state is correct
     // ──────────────────────────────────────────────────────────────────────────
-    let token_client = token::Client::new(env, &token_addr);
-    token_client.transfer(&env.current_contract_address(), &merchant, &amount);
+    token_client.transfer(&contract, &merchant, &amount);
 
     Ok(())
+}
+
+fn merchant_config_key(env: &Env, merchant: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "merch_conf"), merchant.clone())
+}
+
+pub fn set_merchant_config(
+    env: &Env,
+    merchant: Address,
+    config: MerchantConfig,
+) -> Result<(), Error> {
+    merchant.require_auth();
+    
+    // Validation: URL shouldn't be excessively long (standard limit 256)
+    if config.redirect_url.len() > 256 {
+        return Err(Error::InvalidAmount); // Reusing error or add specific one
+    }
+
+    let key = merchant_config_key(env, &merchant);
+    env.storage().instance().set(&key, &config);
+    Ok(())
+}
+
+pub fn get_merchant_config(env: &Env, merchant: Address) -> Option<MerchantConfig> {
+    let key = merchant_config_key(env, &merchant);
+    env.storage().instance().get(&key)
 }

@@ -27,6 +27,9 @@ Merchant earnings are now tracked by `(merchant, token)` bucket:
 - `get_merchant_balance_by_token(merchant, token)`
 - `withdraw_merchant_token_funds(merchant, token, amount)`
 
+Withdrawals validate both the merchant's bucket balance and the contract's custody balance for
+that token before transferring funds.
+
 Legacy `get_merchant_balance` and `withdraw_merchant_funds` continue to target the default token bucket.
 
 ## Query helper

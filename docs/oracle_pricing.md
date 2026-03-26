@@ -26,8 +26,10 @@ Read:
 Safety checks:
 
 - enabled requires oracle address
+- enabled requires `max_age_seconds > 0` (zero disables staleness guard and is rejected)
 - stale data rejected when quote age exceeds `max_age_seconds`
 - zero/negative price rejected
+- zero timestamp rejected as unavailable
 
 ## Charge conversion
 
