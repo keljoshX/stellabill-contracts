@@ -16,6 +16,7 @@ mod blocklist;
 mod charge_core;
 mod merchant;
 mod metadata;
+pub mod migration;
 mod oracle;
 mod queries;
 mod reentrancy;
@@ -32,19 +33,19 @@ pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    AcceptedToken, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
+    AcceptedToken, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
     BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
     BillingStatementAggregate, BillingStatementsPage, CapInfo, ContractSnapshot, DataKey,
     EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent, MetadataSetEvent,
-    MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
-    PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
-    Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
+    LifetimeCapReachedEvent, MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent,
+    MetadataDeletedEvent, MetadataSetEvent, MigrationExportEvent, NextChargeInfo,
+    OneOffChargedEvent, OracleConfig, OraclePrice, PartialRefundEvent, PlanTemplate,
+    PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason, Subscription,
+    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
     SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
     MAX_METADATA_VALUE_LENGTH,
 };
-
 /// Maximum subscription ID this contract will ever allocate.
 ///
 /// When the counter reaches this value [`SubscriptionVault::create_subscription`]
@@ -664,6 +665,21 @@ impl SubscriptionVault {
         merchant::get_merchant_balance_by_token(&env, &merchant, &token)
     }
 
+    /// Check if a merchant has enabled a blanket pause.
+    pub fn get_merchant_paused(env: Env, merchant: Address) -> bool {
+        merchant::get_merchant_paused(&env, merchant)
+    }
+
+    /// Enable a blanket pause for all of the merchant's subscriptions.
+    pub fn pause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::pause_merchant(&env, merchant)
+    }
+
+    /// Disable a blanket pause for the merchant's subscriptions.
+    pub fn unpause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::unpause_merchant(&env, merchant)
+    }
+
     // ── Queries ──────────────────────────────────────────────────────────────
 
     /// Read subscription by id.
@@ -943,7 +959,31 @@ impl SubscriptionVault {
     pub fn is_blocklisted(env: Env, subscriber: Address) -> bool {
         blocklist::is_blocklisted(&env, &subscriber)
     }
+
+    /// Set global configuration for a merchant.
+    ///
+    /// Authorization: merchant.
+    pub fn set_merchant_config(
+        env: Env,
+        merchant: Address,
+        fee_address: Option<Address>,
+        redirect_url: String,
+        is_paused: bool,
+    ) -> Result<(), Error> {
+        let config = crate::types::MerchantConfig {
+            fee_address,
+            redirect_url,
+            is_paused,
+        };
+        merchant::set_merchant_config(&env, merchant, config)
+    }
+
+    /// Get the global configuration for a merchant.
+    pub fn get_merchant_config(env: Env, merchant: Address) -> Option<crate::types::MerchantConfig> {
+        merchant::get_merchant_config(&env, merchant)
+    }
+
 }
 
 #[cfg(test)]
-mod test;
+mod test_governance;

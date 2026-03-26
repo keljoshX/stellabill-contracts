@@ -183,6 +183,7 @@ Tests are organized in the following sections in `contracts/subscription_vault/s
 3. **Complex State Transition Sequences**: Multi-step lifecycle scenarios
 4. **Invalid Transition Tests**: `#[should_panic]` tests for blocked transitions
 5. **Comprehensive Edge Case Tests (#39)**: New comprehensive suite covering all edge cases
+6. **Property Tests**: Deterministic pseudo-random action sequences checked against a manual transition model
 
 ### Coverage Goals
 
@@ -193,6 +194,8 @@ Tests are organized in the following sections in `contracts/subscription_vault/s
 - State preservation verified across operations
 - Multi-subscription scenarios covered
 - Authorization scenarios covered
+- Arbitrary lifecycle sequences verified against helper and entrypoint transition rules
+- Grace-period and insufficient-balance recovery paths sampled repeatedly
 
 ### Test Naming Convention
 
