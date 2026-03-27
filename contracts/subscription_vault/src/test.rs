@@ -1579,6 +1579,142 @@ fn test_compute_next_charge_info_insufficient_balance() {
     };
     let info = compute_next_charge_info(&sub);
     assert!(info.is_charge_expected);
+    assert_eq!(info.next_charge_timestamp, T0 + INTERVAL);
+}
+
+#[test]
+fn test_next_charge_info_cross_check_interval_boundaries_active() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+    seed_balance(&env, &client, id, PREPAID);
+
+    let info = client.get_next_charge_info(&id);
+    assert!(info.is_charge_expected);
+    assert_eq!(info.next_charge_timestamp, T0 + INTERVAL);
+
+    env.ledger().with_mut(|li| li.timestamp = info.next_charge_timestamp - 1);
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Err(Ok(Error::IntervalNotElapsed))
+    );
+
+    env.ledger().with_mut(|li| li.timestamp = info.next_charge_timestamp);
+    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(())));
+}
+
+#[test]
+fn test_next_charge_info_cross_check_status_gating() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+
+    let (id_paused, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Paused);
+    let (id_cancelled, _, _) =
+        create_test_subscription(&env, &client, SubscriptionStatus::Cancelled);
+    let (id_insufficient, _, _) =
+        create_test_subscription(&env, &client, SubscriptionStatus::InsufficientBalance);
+    let (id_grace, _, _) =
+        create_test_subscription(&env, &client, SubscriptionStatus::GracePeriod);
+
+    for id in [id_paused, id_cancelled, id_insufficient, id_grace] {
+        seed_balance(&env, &client, id, PREPAID);
+    }
+
+    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL);
+
+    let paused_info = client.get_next_charge_info(&id_paused);
+    assert!(!paused_info.is_charge_expected);
+    assert_eq!(
+        client.try_charge_subscription(&id_paused),
+        Err(Ok(Error::NotActive))
+    );
+
+    let cancelled_info = client.get_next_charge_info(&id_cancelled);
+    assert!(!cancelled_info.is_charge_expected);
+    assert_eq!(
+        client.try_charge_subscription(&id_cancelled),
+        Err(Ok(Error::NotActive))
+    );
+
+    let insufficient_info = client.get_next_charge_info(&id_insufficient);
+    assert!(!insufficient_info.is_charge_expected);
+    assert_eq!(
+        client.try_charge_subscription(&id_insufficient),
+        Err(Ok(Error::NotActive))
+    );
+
+    let grace_info = client.get_next_charge_info(&id_grace);
+    assert!(grace_info.is_charge_expected);
+    assert_eq!(client.try_charge_subscription(&id_grace), Ok(Ok(())));
+}
+
+// -- Top-up estimation (precision) --------------------------------------------
+
+#[test]
+fn test_estimate_topup_zero_intervals_returns_zero() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+    seed_balance(&env, &client, id, PREPAID);
+
+    assert_eq!(client.estimate_topup_for_intervals(&id, &0), 0);
+}
+
+#[test]
+fn test_estimate_topup_balance_already_sufficient_returns_zero() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+
+    // Balance covers 3 future charges.
+    seed_balance(&env, &client, id, 3 * AMOUNT);
+    assert_eq!(client.estimate_topup_for_intervals(&id, &3), 0);
+}
+
+#[test]
+fn test_estimate_topup_cross_check_after_actual_charge() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+    seed_balance(&env, &client, id, PREPAID);
+
+    // Before any charge, to cover next 6 intervals we need: 6*AMOUNT - PREPAID.
+    assert_eq!(
+        client.estimate_topup_for_intervals(&id, &6),
+        6 * AMOUNT - PREPAID
+    );
+
+    // Execute one real charge at the exact boundary.
+    env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL);
+    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(())));
+
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.prepaid_balance, PREPAID - AMOUNT);
+
+    // Now, covering next 5 intervals should be the same shortfall.
+    assert_eq!(
+        client.estimate_topup_for_intervals(&id, &5),
+        5 * AMOUNT - (PREPAID - AMOUNT)
+    );
+}
+
+#[test]
+fn test_estimate_topup_overflow_protection() {
+    let (env, client, _, _) = setup_test_env();
+    env.ledger().with_mut(|li| li.timestamp = T0);
+    let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+
+    // Force multiplication overflow: amount * num_intervals.
+    let mut sub = client.get_subscription(&id);
+    sub.amount = i128::MAX;
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&id, &sub);
+    });
+
+    assert_eq!(
+        client.try_estimate_topup_for_intervals(&id, &2),
+        Err(Ok(Error::Overflow))
+    );
 }
 
 #[test]
