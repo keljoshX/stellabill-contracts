@@ -1,4 +1,6 @@
-use crate::{ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
+use crate::{
+    ChargeExecutionResult, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
+};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, Env};
 
@@ -45,7 +47,10 @@ fn repeated_failed_charges_preserve_financial_state() {
     let (id, _subscriber, merchant) = create_subscription(&env, &client);
 
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::InsufficientBalance))
+    );
 
     let first = client.get_subscription(&id);
     assert_eq!(first.status, SubscriptionStatus::GracePeriod);
@@ -59,7 +64,10 @@ fn repeated_failed_charges_preserve_financial_state() {
     );
 
     env.ledger().set_timestamp(T0 + INTERVAL + 2);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::InsufficientBalance))
+    );
 
     let second = client.get_subscription(&id);
     assert_eq!(second.status, SubscriptionStatus::GracePeriod);
@@ -73,7 +81,10 @@ fn repeated_failed_charges_preserve_financial_state() {
     );
 
     env.ledger().set_timestamp(T0 + INTERVAL + GRACE_PERIOD + 1);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::InsufficientBalance))
+    );
 
     let after = client.get_subscription(&id);
     assert_eq!(after.status, SubscriptionStatus::InsufficientBalance);
@@ -97,7 +108,10 @@ fn resume_from_underfunded_state_requires_sufficient_topup() {
     token_admin.mint(&subscriber, &20_000_000i128);
 
     env.ledger().set_timestamp(T0 + INTERVAL + GRACE_PERIOD + 1);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::InsufficientBalance))
+    );
     assert_eq!(
         client.get_subscription(&id).status,
         SubscriptionStatus::InsufficientBalance
@@ -125,7 +139,10 @@ fn cancel_from_insufficient_balance_succeeds() {
     let (id, subscriber, _merchant) = create_subscription(&env, &client);
 
     env.ledger().set_timestamp(T0 + INTERVAL + GRACE_PERIOD + 1);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::InsufficientBalance))
+    );
     assert_eq!(
         client.get_subscription(&id).status,
         SubscriptionStatus::InsufficientBalance

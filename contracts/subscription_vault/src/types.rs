@@ -525,6 +525,9 @@ pub struct BillingCompactionSummary {
 }
 
 /// Event emitted when statement compaction executes.
+///
+/// `aggregate_*` fields mirror [`BillingStatementAggregate`] after this run so indexers can
+/// verify on-chain totals without a follow-up `get_stmt_compacted_aggregate` call (optional).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BillingCompactedEvent {
@@ -534,6 +537,10 @@ pub struct BillingCompactedEvent {
     pub kept_count: u32,
     pub total_pruned_amount: i128,
     pub timestamp: u64,
+    pub aggregate_pruned_count: u32,
+    pub aggregate_total_amount: i128,
+    pub aggregate_oldest_period_start: Option<u64>,
+    pub aggregate_newest_period_end: Option<u64>,
 }
 
 /// Optional oracle pricing configuration for cross-currency plans.

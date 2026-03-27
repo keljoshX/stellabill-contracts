@@ -50,7 +50,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
-pub use queries::compute_next_charge_info;
+pub use queries::{compute_next_charge_info, MAX_SUBSCRIPTION_LIST_PAGE};
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
     AcceptedToken, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
@@ -803,12 +803,14 @@ impl SubscriptionVault {
     }
 
     /// Return subscriptions for a merchant, paginated.
+    ///
+    /// `limit` must be between 1 and [`queries::MAX_SUBSCRIPTION_LIST_PAGE`] inclusive.
     pub fn get_subscriptions_by_merchant(
         env: Env,
         merchant: Address,
         start: u32,
         limit: u32,
-    ) -> Vec<Subscription> {
+    ) -> Result<Vec<Subscription>, Error> {
         queries::get_subscriptions_by_merchant(&env, merchant, start, limit)
     }
 
@@ -821,6 +823,11 @@ impl SubscriptionVault {
     /// Return the total number of subscriptions for a merchant.
     pub fn get_merchant_subscription_count(env: Env, merchant: Address) -> u32 {
         queries::get_merchant_subscription_count(&env, merchant)
+    }
+
+    /// Return the number of subscription ids indexed for a settlement token (for pagination).
+    pub fn get_token_subscription_count(env: Env, token: Address) -> u32 {
+        queries::get_token_subscription_count(&env, token)
     }
 
     /// List all subscription IDs for a given subscriber with pagination.
@@ -903,32 +910,15 @@ impl SubscriptionVault {
     }
 
     /// Return subscriptions for a token, paginated by offset.
+    ///
+    /// `limit` must be between 1 and [`queries::MAX_SUBSCRIPTION_LIST_PAGE`] inclusive.
     pub fn get_subscriptions_by_token(
         env: Env,
         token: Address,
         start: u32,
         limit: u32,
-    ) -> Vec<Subscription> {
-        let key = (Symbol::new(&env, "token_subs"), token);
-        let ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
-        if limit == 0 || start >= ids.len() {
-            return Vec::new(&env);
-        }
-        let end = if start + limit > ids.len() {
-            ids.len()
-        } else {
-            start + limit
-        };
-        let mut out = Vec::new(&env);
-        let mut i = start;
-        while i < end {
-            let id = ids.get(i).unwrap();
-            if let Some(sub) = env.storage().instance().get::<u32, Subscription>(&id) {
-                out.push_back(sub);
-            }
-            i += 1;
-        }
-        out
+    ) -> Result<Vec<Subscription>, Error> {
+        queries::get_subscriptions_by_token(&env, token, start, limit)
     }
 
     /// Configure statement retention (`keep_recent` detailed rows per subscription). Admin only.
@@ -964,6 +954,7 @@ impl SubscriptionVault {
             subscription_id,
             keep_recent_override,
         )?;
+        let aggregate = statements::get_compacted_aggregate(&env, subscription_id);
         env.events().publish(
             (Symbol::new(&env, "billing_compacted"), subscription_id),
             BillingCompactedEvent {
@@ -973,6 +964,10 @@ impl SubscriptionVault {
                 kept_count: summary.kept_count,
                 total_pruned_amount: summary.total_pruned_amount,
                 timestamp: env.ledger().timestamp(),
+                aggregate_pruned_count: aggregate.pruned_count,
+                aggregate_total_amount: aggregate.total_amount,
+                aggregate_oldest_period_start: aggregate.oldest_period_start,
+                aggregate_newest_period_end: aggregate.newest_period_end,
             },
         );
         Ok(summary)

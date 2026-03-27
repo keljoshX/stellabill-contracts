@@ -29,6 +29,9 @@ fn aggregate_key(subscription_id: u32) -> (Symbol, u32) {
     (KEY_AGGREGATE, subscription_id)
 }
 
+/// Persist default retention (`keep_recent` detailed rows). Caller must enforce admin auth.
+///
+/// `u32::MAX` means no automatic pruning threshold (keep all detail until overridden at compaction).
 pub fn set_retention_config(env: &Env, keep_recent: u32) {
     env.storage()
         .instance()

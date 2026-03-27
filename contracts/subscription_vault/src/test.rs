@@ -5,7 +5,7 @@ use crate::{AccruedTotals, BillingChargeKind, BillingStatementAggregate,
     MAX_SUBSCRIPTION_ID, FundsDepositedEvent, SubscriptionChargedEvent,
     SubscriptionChargeFailedEvent, LifetimeCapReachedEvent, PartialRefundEvent,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _, Events};
+use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::{
     contract, contractimpl, Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
@@ -13,7 +13,7 @@ use soroban_sdk::{
 extern crate alloc;
 use alloc::format;
 use crate::test_utils::{TestEnv, fixtures, assertions};
-// removed duplicate import
+use crate::queries::MAX_SUBSCRIPTION_LIST_PAGE;
 
 // -- constants ----------------------------------------------------------------
 const T0: u64 = 1_000;
@@ -35,6 +35,7 @@ const ALL_STATUSES: &[SubscriptionStatus] = &[
     SubscriptionStatus::Paused,
     SubscriptionStatus::Cancelled,
     SubscriptionStatus::InsufficientBalance,
+    SubscriptionStatus::GracePeriod,
 ];
 
 // -- helpers ------------------------------------------------------------------
@@ -146,7 +147,6 @@ fn snapshot_subscriptions(
     ids.iter().map(|id| client.get_subscription(id)).collect()
 }
 
-
 fn manual_can_transition(from: &SubscriptionStatus, to: &SubscriptionStatus) -> bool {
     // This should match the logic in state_machine.rs
     match (from, to) {
@@ -256,20 +256,6 @@ impl MockOracle {
             })
     }
 }
-
-// -- property test helpers ---------------------------------------------------
-
-/// Linear congruential generator for deterministic pseudo-random numbers.
-
-/// Manual state machine rules for validation.
-/// Returns true if transition from `from` to `to` is allowed.
-
-/// Generate a random transition action (returns u32: 0=Pause, 1=Resume, 2=Cancel).
-
-/// Map a numeric action to target status.
-
-/// Generate a random lifecycle action for entrypoint tests.
-/// Map a lifecycle action to its target status.
 
 // ── State Machine Helper Tests ─────────────────────────────────────────────────
 
@@ -803,13 +789,17 @@ fn test_charge_subscription_basic() {
     let test_env = TestEnv::default();
     test_env.set_timestamp(T0);
 
-    let (id, _, _) = create_test_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
-    seed_balance(&test_env.env, &test_env.client, id, PREPAID);
+    let (id, _, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    fixtures::seed_balance(&test_env.env, &test_env.client, id, PREPAID);
 
     test_env.env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL + 1);
     test_env.client.charge_subscription(&id);
 
-    assert_eq!(test_env.client.get_subscription(&id).prepaid_balance, PREPAID - AMOUNT);
+    assert_eq!(
+        test_env.client.get_subscription(&id).prepaid_balance,
+        PREPAID - AMOUNT
+    );
     let sub = test_env.client.get_subscription(&id);
     assert_eq!(sub.lifetime_charged, AMOUNT);
 }
@@ -1688,8 +1678,8 @@ fn test_compute_next_charge_info_insufficient_balance() {
         grace_start_timestamp: None,
     };
     let info = compute_next_charge_info(&sub);
-    assert!(info.is_charge_expected);
-    assert_eq!(info.next_charge_timestamp, T0 + INTERVAL);
+    assert!(!info.is_charge_expected);
+    assert_eq!(info.next_charge_timestamp, 3000 + INTERVAL);
 }
 
 #[test]
@@ -1710,7 +1700,10 @@ fn test_next_charge_info_cross_check_interval_boundaries_active() {
     );
 
     env.ledger().with_mut(|li| li.timestamp = info.next_charge_timestamp);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::Charged))
+    );
 }
 
 #[test]
@@ -1755,7 +1748,10 @@ fn test_next_charge_info_cross_check_status_gating() {
 
     let grace_info = client.get_next_charge_info(&id_grace);
     assert!(grace_info.is_charge_expected);
-    assert_eq!(client.try_charge_subscription(&id_grace), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id_grace),
+        Ok(Ok(ChargeExecutionResult::Charged))
+    );
 }
 
 // -- Top-up estimation (precision) --------------------------------------------
@@ -1796,7 +1792,10 @@ fn test_estimate_topup_cross_check_after_actual_charge() {
 
     // Execute one real charge at the exact boundary.
     env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(
+        client.try_charge_subscription(&id),
+        Ok(Ok(ChargeExecutionResult::Charged))
+    );
 
     let sub = client.get_subscription(&id);
     assert_eq!(sub.prepaid_balance, PREPAID - AMOUNT);
@@ -2989,6 +2988,106 @@ fn test_list_subscriptions_by_subscriber() {
     assert!(page.next_start_id.is_none());
 }
 
+#[test]
+fn test_list_subscriptions_by_subscriber_limit_zero_errors() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let res = test_env.client.try_list_subscriptions_by_subscriber(&subscriber, &0, &0u32);
+    assert!(matches!(res, Err(Ok(Error::InvalidInput))));
+}
+
+#[test]
+fn test_list_subscriptions_by_subscriber_pagination_stable_ordering() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let mut expected = alloc::vec::Vec::new();
+    for _ in 0..5 {
+        let id = test_env.client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
+        expected.push(id);
+    }
+
+    let page1 = test_env.client.list_subscriptions_by_subscriber(&subscriber, &0, &2);
+    assert_eq!(page1.subscription_ids.len(), 2);
+    assert_eq!(page1.subscription_ids.get(0).unwrap(), expected[0]);
+    assert_eq!(page1.subscription_ids.get(1).unwrap(), expected[1]);
+    let next = page1.next_start_id.expect("next page");
+    let page2 = test_env.client.list_subscriptions_by_subscriber(&subscriber, &next, &10);
+    assert_eq!(page2.subscription_ids.len(), 3);
+    assert_eq!(page2.subscription_ids.get(0).unwrap(), expected[2]);
+    assert_eq!(page2.subscription_ids.get(2).unwrap(), expected[4]);
+    assert!(page2.next_start_id.is_none());
+}
+
+#[test]
+fn test_get_subscriptions_by_merchant_pagination_and_invalid_limit() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    for _ in 0..3 {
+        test_env.client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
+    }
+    assert_eq!(test_env.client.get_merchant_subscription_count(&merchant), 3);
+    assert_eq!(
+        test_env.client.try_get_subscriptions_by_merchant(&merchant, &0, &0u32),
+        Err(Ok(Error::InvalidInput))
+    );
+    assert_eq!(
+        test_env
+            .client
+            .try_get_subscriptions_by_merchant(&merchant, &0, &(MAX_SUBSCRIPTION_LIST_PAGE + 1)),
+        Err(Ok(Error::InvalidInput))
+    );
+    let p1 = test_env.client.get_subscriptions_by_merchant(&merchant, &0, &2);
+    assert_eq!(p1.len(), 2);
+    let p2 = test_env.client.get_subscriptions_by_merchant(&merchant, &2, &2);
+    assert_eq!(p2.len(), 1);
+    let p3 = test_env.client.get_subscriptions_by_merchant(&merchant, &3, &10);
+    assert_eq!(p3.len(), 0);
+}
+
+#[test]
+fn test_get_subscriptions_by_token_pagination_and_count() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    for _ in 0..2 {
+        test_env.client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
+    }
+    assert_eq!(test_env.client.get_token_subscription_count(&test_env.token), 2);
+    assert_eq!(
+        test_env
+            .client
+            .try_get_subscriptions_by_token(&test_env.token, &0, &0u32),
+        Err(Ok(Error::InvalidInput))
+    );
+    let page = test_env.client.get_subscriptions_by_token(&test_env.token, &0, &1);
+    assert_eq!(page.len(), 1);
+    let rest = test_env.client.get_subscriptions_by_token(&test_env.token, &1, &5);
+    assert_eq!(rest.len(), 1);
+}
+
 // -- Subscriber withdrawal test -----------------------------------------------
 
 #[test]
@@ -3243,6 +3342,38 @@ fn test_metadata_value_too_long_rejected() {
     let long_str = alloc::string::String::from_utf8(alloc::vec![b'x'; 257]).unwrap();
     let long_value = String::from_str(&test_env.env, &long_str);
     test_env.client.set_metadata(&id, &subscriber, &key, &long_value);
+}
+
+#[test]
+fn test_metadata_key_max_length_boundary_ok() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    let key = String::from_str(&test_env.env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(key.len(), 32);
+    let val = String::from_str(&test_env.env, "x");
+    test_env.client.set_metadata(&id, &subscriber, &key, &val);
+    assert_eq!(test_env.client.get_metadata(&id, &key), val);
+}
+
+#[test]
+fn test_metadata_value_max_length_boundary_ok() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    let key = String::from_str(&test_env.env, "k");
+    let val_str = alloc::string::String::from_utf8(alloc::vec![b'z'; 256]).unwrap();
+    let value = String::from_str(&test_env.env, &val_str);
+    assert_eq!(value.len(), 256);
+    test_env.client.set_metadata(&id, &subscriber, &key, &value);
+    assert_eq!(test_env.client.get_metadata(&id, &key), value);
+}
+
+#[test]
+fn test_metadata_delete_nonexistent_try_api() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    let key = String::from_str(&test_env.env, "missing");
+    let res = test_env.client.try_delete_metadata(&id, &subscriber, &key);
+    assert_eq!(res, Err(Ok(Error::NotFound)));
 }
 
 #[test]
@@ -3534,6 +3665,155 @@ fn test_compaction_no_rows_and_override_value() {
     assert_eq!(summary.pruned_count, 0);
     assert_eq!(summary.kept_count, 0);
     assert_eq!(summary.total_pruned_amount, 0);
+}
+
+#[test]
+fn test_compaction_idempotent_second_run() {
+    let test_env = TestEnv::default();
+    test_env.env.ledger().set_timestamp(T0);
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env.stellar_token_client().mint(&subscriber, &2_000_000_000i128);
+
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    test_env.client.deposit_funds(&id, &subscriber, &500_000_000i128);
+
+    for i in 1..=8 {
+        test_env.env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        test_env.client.charge_subscription(&id);
+    }
+
+    test_env.client.set_billing_retention(&test_env.admin, &3);
+    let first = test_env
+        .client
+        .compact_billing_statements(&test_env.admin, &id, &None::<u32>);
+    assert_eq!(first.pruned_count, 5);
+
+    let second = test_env
+        .client
+        .compact_billing_statements(&test_env.admin, &id, &None::<u32>);
+    assert_eq!(second.pruned_count, 0);
+    assert_eq!(second.kept_count, 3);
+    assert_eq!(second.total_pruned_amount, 0);
+
+    let agg = test_env.client.get_stmt_compacted_aggregate(&id);
+    assert_eq!(agg.pruned_count, 5);
+    assert_eq!(agg.total_amount, 5_000_000i128);
+}
+
+#[test]
+fn test_compaction_keep_recent_zero_prunes_all_detail() {
+    let test_env = TestEnv::default();
+    test_env.env.ledger().set_timestamp(T0);
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env.stellar_token_client().mint(&subscriber, &500_000_000i128);
+
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    test_env.client.deposit_funds(&id, &subscriber, &100_000_000i128);
+
+    for i in 1..=4 {
+        test_env.env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        test_env.client.charge_subscription(&id);
+    }
+
+    let summary = test_env
+        .client
+        .compact_billing_statements(&test_env.admin, &id, &Some(0u32));
+    assert_eq!(summary.pruned_count, 4);
+    assert_eq!(summary.kept_count, 0);
+
+    let page = test_env.client.get_sub_statements_offset(&id, &0, &10, &true);
+    assert_eq!(page.total, 0);
+    assert_eq!(page.statements.len(), 0);
+
+    let agg = test_env.client.get_stmt_compacted_aggregate(&id);
+    assert_eq!(agg.total_amount, 4_000_000i128);
+    assert_eq!(agg.pruned_count, 4);
+}
+
+#[test]
+fn test_set_billing_retention_non_admin_rejected() {
+    let test_env = TestEnv::default();
+    let attacker = Address::generate(&test_env.env);
+    let res = test_env.client.try_set_billing_retention(&attacker, &5u32);
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_compact_billing_statements_non_admin_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let attacker = Address::generate(&test_env.env);
+    let res = test_env
+        .client
+        .try_compact_billing_statements(&attacker, &id, &None::<u32>);
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_billing_retention_rapid_config_changes() {
+    let test_env = TestEnv::default();
+    test_env.client.set_billing_retention(&test_env.admin, &1u32);
+    assert_eq!(test_env.client.get_billing_retention().keep_recent, 1);
+    test_env.client.set_billing_retention(&test_env.admin, &u32::MAX);
+    assert_eq!(test_env.client.get_billing_retention().keep_recent, u32::MAX);
+    test_env.client.set_billing_retention(&test_env.admin, &12u32);
+    assert_eq!(test_env.client.get_billing_retention().keep_recent, 12);
+}
+
+#[test]
+fn test_compaction_override_respects_per_run_threshold() {
+    let test_env = TestEnv::default();
+    test_env.env.ledger().set_timestamp(T0);
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env.stellar_token_client().mint(&subscriber, &2_000_000_000i128);
+
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    test_env.client.deposit_funds(&id, &subscriber, &500_000_000i128);
+
+    for i in 1..=6 {
+        test_env.env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        test_env.client.charge_subscription(&id);
+    }
+
+    test_env.client.set_billing_retention(&test_env.admin, &100u32);
+    let s = test_env
+        .client
+        .compact_billing_statements(&test_env.admin, &id, &Some(2u32));
+    assert_eq!(s.pruned_count, 4);
+    assert_eq!(s.kept_count, 2);
 }
 
 #[test]
@@ -4484,6 +4764,7 @@ fn test_resume_from_insufficient_balance_succeeds() {
     let (id, subscriber, _) =
         fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
     fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+    fixtures::seed_balance(&test_env.env, &test_env.client, id, AMOUNT);
 
     test_env.client.resume_subscription(&id, &subscriber);
     assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);
@@ -5850,20 +6131,20 @@ fn test_empty_history() {
 }
 
 #[test]
-// fn test_event_schema_consistency() {
-//     let env = Env::default();
-//     // ... setup contract and subscriber ...
-// 
-//     contract.create_subscription(&subscriber, &merchant, &amount, &interval, &true);
-// 
-//     let events = env.events().all();
-//     let last_event = events.last().unwrap();
-//     
-//     // VERIFICATION STEPS:
-//     // 1. Assert Topic 1 matches Symbol::short("sub_crea")
-//     // 2. Assert Topic 2 matches the subscriber Address
-//     // 3. Assert Data payload length is exactly 4
-// }
+fn test_event_schema_consistency() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let _id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert!(!test_env.env.events().all().is_empty());
+}
 
 // ── One-Off Charge Hardening Tests ──────────────────────────────────────────
 

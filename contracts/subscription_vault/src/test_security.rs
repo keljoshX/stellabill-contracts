@@ -183,8 +183,10 @@ fn test_charge_amount_greater_than_balance_fails() {
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
 
     let result = client.try_charge_subscription(&id);
-    assert!(result.is_err());
-    // Error code 1005 is InsufficientBalance
+    assert_eq!(
+        result,
+        Ok(Ok(crate::ChargeExecutionResult::InsufficientBalance))
+    );
 }
 
 #[test]
