@@ -3898,6 +3898,180 @@ fn test_create_subscription_with_unaccepted_token_fails() {
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
 
+#[test]
+fn test_create_subscription_zero_amount_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &0i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_create_subscription_interval_too_small_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &59u64,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_create_subscription_lifetime_cap_less_than_amount_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &10i128,
+        &INTERVAL,
+        &false,
+        &Some(9i128),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_create_subscription_blocklisted_subscriber_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env
+        .client
+        .add_to_blocklist(&test_env.admin, &subscriber, &None);
+
+    let result = test_env.client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
+}
+
+#[test]
+fn test_create_subscription_with_token_zero_amount_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &test_env.token,
+        &0i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_create_subscription_with_token_interval_too_small_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &test_env.token,
+        &1_000_000i128,
+        &59u64,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_create_subscription_with_token_lifetime_cap_less_than_amount_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &test_env.token,
+        &10i128,
+        &INTERVAL,
+        &false,
+        &Some(9i128),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_create_subscription_with_token_blocklisted_subscriber_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env
+        .client
+        .add_to_blocklist(&test_env.admin, &subscriber, &None);
+
+    let result = test_env.client.try_create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &test_env.token,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    assert_eq!(result, Err(Ok(Error::SubscriberBlocklisted)));
+}
+
+#[test]
+fn test_create_subscription_max_amount_and_cap_succeeds() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &i128::MAX,
+        &INTERVAL,
+        &false,
+        &Some(i128::MAX),
+    );
+    let sub = test_env.client.get_subscription(&id);
+    assert_eq!(sub.amount, i128::MAX);
+    assert_eq!(sub.lifetime_cap, Some(i128::MAX));
+}
+
+#[test]
+fn test_create_subscription_max_amount_cap_smaller_rejected() {
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let result = test_env.client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &i128::MAX,
+        &INTERVAL,
+        &false,
+        &Some(i128::MAX - 1),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
 // =============================================================================
 // Admin Rotation Hardening Tests
 // =============================================================================
