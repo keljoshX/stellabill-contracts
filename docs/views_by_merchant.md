@@ -16,16 +16,18 @@ pub fn get_subscriptions_by_merchant(
     merchant: Address,
     start: u32,
     limit: u32,
-) -> Vec<Subscription>
+) -> Result<Vec<Subscription>, Error>
 ```
 
 | Parameter  | Type      | Description                                    |
 |------------|-----------|------------------------------------------------|
 | `merchant` | `Address` | Merchant address to query                      |
-| `start`    | `u32`     | 0-based offset into the merchant's list        |
-| `limit`    | `u32`     | Maximum number of subscriptions to return       |
+| `start`    | `u32`     | 0-based offset into the merchant's id list   |
+| `limit`    | `u32`     | Page size: must be `1`–`100` inclusive         |
 
-**Returns:** `Vec<Subscription>` — ordered chronologically (insertion order). Empty if the merchant has no subscriptions or `start` exceeds the total count.
+**Returns:** `Ok(Vec<Subscription>)` in stable index order (subscription creation / insertion order). Returns `Err(Error::InvalidInput)` if `limit` is `0` or greater than `100`. Returns an empty vec if `start` is past the end of the id list.
+
+**Index assumption:** Offsets are into the stored `MerchantSubs` id vector. If an id ever had no subscription record (abnormal), that slot is skipped in the returned vec; use `get_merchant_subscription_count` for the list length when paging, not `result.len()` alone.
 
 #### Usage example (Soroban CLI)
 

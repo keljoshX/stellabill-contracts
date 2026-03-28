@@ -16,6 +16,7 @@ mod blocklist;
 mod charge_core;
 mod merchant;
 mod metadata;
+pub mod migration;
 mod oracle;
 mod queries;
 mod reentrancy;
@@ -23,6 +24,8 @@ pub mod safe_math;
 mod state_machine;
 mod statements;
 mod subscription;
+#[cfg(test)]
+mod test;
 mod types;
 mod accounting;
 
@@ -30,22 +33,23 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
-pub use queries::compute_next_charge_info;
+pub use queries::{compute_next_charge_info, MAX_SUBSCRIPTION_LIST_PAGE};
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    AcceptedToken, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
+    AcceptedToken, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
     BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
-    BillingStatementAggregate, BillingStatementsPage, CapInfo, ContractSnapshot, DataKey,
+    BillingStatementAggregate, BillingStatementsPage, CapInfo, ChargeExecutionResult, ContractSnapshot, DataKey,
     EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent, MetadataSetEvent,
-    MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig, OraclePrice,
-    PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason,
-    Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
+    LifetimeCapReachedEvent, MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent,
+    MetadataDeletedEvent, MetadataSetEvent, MigrationExportEvent, NextChargeInfo,
+    OneOffChargedEvent, OracleConfig, OraclePrice, PartialRefundEvent, PlanTemplate,
+    PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason, Subscription,
+    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionChargeFailedEvent, SubscriptionCreatedEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
-    SubscriptionStatus, SubscriptionSummary, MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH,
-    MAX_METADATA_VALUE_LENGTH,
+    SubscriptionStatus, SubscriptionSummary, UsageLimits, UsageState, UsageStatementEvent,
+    AccruedTotals, MerchantConfig, TokenEarnings, TokenReconciliationSnapshot,
+    MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH, MAX_METADATA_VALUE_LENGTH,
 };
-
 /// Maximum subscription ID this contract will ever allocate.
 ///
 /// When the counter reaches this value [`SubscriptionVault::create_subscription`]
@@ -503,6 +507,14 @@ impl SubscriptionVault {
         subscription::do_set_plan_max_active_subs(&env, merchant, plan_template_id, max_active)
     }
 
+    /// Returns the configured max-active-subscriptions limit for a plan template.
+    ///
+    /// A value of `0` means no limit is enforced. This is the default when
+    /// `set_plan_max_active_subs` has never been called for the given plan.
+    pub fn get_plan_max_active_subs(env: Env, plan_template_id: u32) -> u32 {
+        queries::get_plan_max_active_subs(&env, plan_template_id)
+    }
+
     /// Migrates an existing subscription to a newer version of the same plan template.
     ///
     /// The subscriber must authorize this call. Migration is only allowed between
@@ -601,7 +613,7 @@ impl SubscriptionVault {
         subscription::do_pause_subscription(&env, subscription_id, authorizer)
     }
 
-    /// Resume a subscription to Active. Allowed from Paused or InsufficientBalance.
+    /// Resume a subscription to Active. Allowed from Paused, GracePeriod, or InsufficientBalance.
     pub fn resume_subscription(
         env: Env,
         subscription_id: u32,
@@ -611,12 +623,15 @@ impl SubscriptionVault {
     }
 
     /// Merchant-initiated one-off charge against the subscription's prepaid balance.
+    ///
+    /// **This function is disabled when the emergency stop is active.**
     pub fn charge_one_off(
         env: Env,
         subscription_id: u32,
         merchant: Address,
         amount: i128,
     ) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
         subscription::do_charge_one_off(&env, subscription_id, merchant, amount)
     }
 
@@ -626,8 +641,10 @@ impl SubscriptionVault {
     ///
     /// **This function is disabled when the emergency stop is active.**
     ///
-    /// Enforces strict interval timing and replay protection.
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
+    /// Enforces strict interval timing and replay protection. Underfunded attempts
+    /// move the subscription into a recoverable non-active state and emit a
+    /// charge-failed event without mutating financial accounting fields.
+    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<ChargeExecutionResult, Error> {
         require_not_emergency_stop(&env)?;
         charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
     }
@@ -637,7 +654,46 @@ impl SubscriptionVault {
     /// **This function is disabled when the emergency stop is active.**
     pub fn charge_usage(env: Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
         require_not_emergency_stop(&env)?;
-        charge_core::charge_usage_one(&env, subscription_id, usage_amount)
+        charge_core::charge_usage_one(
+            &env,
+            subscription_id,
+            usage_amount,
+            String::from_str(&env, "usage"),
+        )
+    }
+
+    /// Charge a metered usage amount against the subscription's prepaid balance with a reference.
+    ///
+    /// **This function is disabled when the emergency stop is active.**
+    pub fn charge_usage_with_reference(
+        env: Env,
+        subscription_id: u32,
+        usage_amount: i128,
+        reference: String,
+    ) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
+        charge_core::charge_usage_one(&env, subscription_id, usage_amount, reference)
+    }
+
+    /// Configure usage rate limits and caps for a subscription. Merchant only.
+    pub fn configure_usage_limits(
+        env: Env,
+        merchant: Address,
+        subscription_id: u32,
+        rate_limit_max_calls: Option<u32>,
+        rate_window_secs: u64,
+        burst_min_interval_secs: u64,
+        usage_cap_units: Option<i128>,
+    ) -> Result<(), Error> {
+        subscription::do_configure_usage_limits(
+            &env,
+            merchant,
+            subscription_id,
+            rate_limit_max_calls,
+            rate_window_secs,
+            burst_min_interval_secs,
+            usage_cap_units,
+        )
     }
 
     // ── Merchant ──────────────────────────────────────────────────────────────
@@ -667,6 +723,48 @@ impl SubscriptionVault {
         merchant::get_merchant_balance_by_token(&env, &merchant, &token)
     }
 
+    /// Check if a merchant has enabled a blanket pause.
+    pub fn get_merchant_paused(env: Env, merchant: Address) -> bool {
+        merchant::get_merchant_paused(&env, merchant)
+    }
+
+    /// Enable a blanket pause for all of the merchant's subscriptions.
+    pub fn pause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::pause_merchant(&env, merchant)
+    }
+
+    /// Disable a blanket pause for the merchant's subscriptions.
+    pub fn unpause_merchant(env: Env, merchant: Address) -> Result<(), Error> {
+        merchant::unpause_merchant(&env, merchant)
+    }
+
+    /// Process a refund from merchant balance back to a subscriber.
+    pub fn merchant_refund(
+        env: Env,
+        merchant: Address,
+        subscriber: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        merchant::merchant_refund(&env, merchant, subscriber, token, amount)
+    }
+
+    /// Get a reconciliation snapshot for all tokens used by a merchant.
+    pub fn get_reconciliation_snapshot(
+        env: Env,
+        merchant: Address,
+    ) -> Vec<crate::types::TokenReconciliationSnapshot> {
+        merchant::get_reconciliation_snapshot(&env, &merchant)
+    }
+
+    /// Get total accrued earnings per token for a merchant.
+    pub fn get_merchant_total_earnings(
+        env: Env,
+        merchant: Address,
+    ) -> Vec<(Address, crate::types::TokenEarnings)> {
+        merchant::get_merchant_total_earnings(&env, &merchant)
+    }
+
     // ── Queries ──────────────────────────────────────────────────────────────
 
     /// Read subscription by id.
@@ -690,12 +788,14 @@ impl SubscriptionVault {
     }
 
     /// Return subscriptions for a merchant, paginated.
+    ///
+    /// `limit` must be between 1 and [`queries::MAX_SUBSCRIPTION_LIST_PAGE`] inclusive.
     pub fn get_subscriptions_by_merchant(
         env: Env,
         merchant: Address,
         start: u32,
         limit: u32,
-    ) -> Vec<Subscription> {
+    ) -> Result<Vec<Subscription>, Error> {
         queries::get_subscriptions_by_merchant(&env, merchant, start, limit)
     }
 
@@ -708,6 +808,11 @@ impl SubscriptionVault {
     /// Return the total number of subscriptions for a merchant.
     pub fn get_merchant_subscription_count(env: Env, merchant: Address) -> u32 {
         queries::get_merchant_subscription_count(&env, merchant)
+    }
+
+    /// Return the number of subscription ids indexed for a settlement token (for pagination).
+    pub fn get_token_subscription_count(env: Env, token: Address) -> u32 {
+        queries::get_token_subscription_count(&env, token)
     }
 
     /// List all subscription IDs for a given subscriber with pagination.
@@ -790,32 +895,15 @@ impl SubscriptionVault {
     }
 
     /// Return subscriptions for a token, paginated by offset.
+    ///
+    /// `limit` must be between 1 and [`queries::MAX_SUBSCRIPTION_LIST_PAGE`] inclusive.
     pub fn get_subscriptions_by_token(
         env: Env,
         token: Address,
         start: u32,
         limit: u32,
-    ) -> Vec<Subscription> {
-        let key = (Symbol::new(&env, "token_subs"), token);
-        let ids: Vec<u32> = env.storage().instance().get(&key).unwrap_or(Vec::new(&env));
-        if limit == 0 || start >= ids.len() {
-            return Vec::new(&env);
-        }
-        let end = if start + limit > ids.len() {
-            ids.len()
-        } else {
-            start + limit
-        };
-        let mut out = Vec::new(&env);
-        let mut i = start;
-        while i < end {
-            let id = ids.get(i).unwrap();
-            if let Some(sub) = env.storage().instance().get::<u32, Subscription>(&id) {
-                out.push_back(sub);
-            }
-            i += 1;
-        }
-        out
+    ) -> Result<Vec<Subscription>, Error> {
+        queries::get_subscriptions_by_token(&env, token, start, limit)
     }
 
     /// Configure statement retention (`keep_recent` detailed rows per subscription). Admin only.
@@ -850,7 +938,8 @@ impl SubscriptionVault {
             &env,
             subscription_id,
             keep_recent_override,
-        );
+        )?;
+        let aggregate = statements::get_compacted_aggregate(&env, subscription_id);
         env.events().publish(
             (Symbol::new(&env, "billing_compacted"), subscription_id),
             BillingCompactedEvent {
@@ -860,6 +949,10 @@ impl SubscriptionVault {
                 kept_count: summary.kept_count,
                 total_pruned_amount: summary.total_pruned_amount,
                 timestamp: env.ledger().timestamp(),
+                aggregate_pruned_count: aggregate.pruned_count,
+                aggregate_total_amount: aggregate.total_amount,
+                aggregate_oldest_period_start: aggregate.oldest_period_start,
+                aggregate_newest_period_end: aggregate.newest_period_end,
             },
         );
         Ok(summary)
@@ -946,7 +1039,6 @@ impl SubscriptionVault {
     pub fn is_blocklisted(env: Env, subscriber: Address) -> bool {
         blocklist::is_blocklisted(&env, &subscriber)
     }
-}
 
 #[cfg(test)]
 mod test;

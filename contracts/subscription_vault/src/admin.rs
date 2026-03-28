@@ -40,7 +40,7 @@ pub fn do_init(
     instance.set(&Symbol::new(env, "admin"), &admin);
     instance.set(&Symbol::new(env, "min_topup"), &min_topup);
     instance.set(&Symbol::new(env, "grace_period"), &grace_period);
-
+    instance.set(&DataKey::SchemaVersion, &1u32);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
         (token, admin, min_topup, grace_period),
@@ -194,13 +194,17 @@ pub fn do_batch_charge(
     for id in subscription_ids.iter() {
         let r = charge_one(env, id, now, None);
         let res = match &r {
-            Ok(()) => BatchChargeResult {
+            Ok(ChargeExecutionResult::Charged) => BatchChargeResult {
                 success: true,
                 error_code: 0,
             },
+            Ok(ChargeExecutionResult::InsufficientBalance) => BatchChargeResult {
+                success: false,
+                error_code: Error::InsufficientBalance.to_code(),
+            },
             Err(e) => BatchChargeResult {
                 success: false,
-                error_code: e.clone().to_code(),
+                error_code: e.to_code(),
             },
         };
         results.push_back(res);
@@ -228,13 +232,31 @@ pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) ->
         return Err(Error::Forbidden);
     }
 
+    // Disallow self-rotation: rotating to the same address is a no-op that
+    // could mask misconfiguration and wastes a transaction.
+    if new_admin == current_admin {
+        return Err(Error::SelfRotation);
+    }
+
+    // Disallow rotating to the contract itself: that would permanently lock
+    // admin privileges since the contract cannot sign transactions.
+    if new_admin == env.current_contract_address() {
+        return Err(Error::InvalidNewAdmin);
+    }
+
+    // Atomic swap: write new admin before emitting the event so any indexer
+    // that reads state on the event sees the already-updated value.
     env.storage()
         .instance()
         .set(&Symbol::new(env, "admin"), &new_admin);
 
     env.events().publish(
-        (Symbol::new(env, "admin_rotation"), current_admin.clone()),
-        (current_admin, new_admin, env.ledger().timestamp()),
+        (Symbol::new(env, "admin_rotated"),),
+        AdminRotatedEvent {
+            old_admin: current_admin,
+            new_admin,
+            timestamp: env.ledger().timestamp(),
+        },
     );
 
     Ok(())
