@@ -98,9 +98,13 @@ These operations will fail with `Error::EmergencyStopActive` (1009):
 | Operation | Entry Point | Description |
 |-----------|-------------|-------------|
 | Create Subscription | `create_subscription` | New subscription agreements |
+| Create Subscription (Token-specific) | `create_subscription_with_token` | New subscription agreements with explicit settlement token |
+| Create Subscription (From Plan) | `create_subscription_from_plan` | New subscription agreements from plan templates |
 | Deposit Funds | `deposit_funds` | Adding funds to existing subscriptions |
 | Charge Subscription | `charge_subscription` | Interval-based billing charges |
 | Charge Usage | `charge_usage` | Usage-based billing charges |
+| Charge Usage (Reference) | `charge_usage_with_reference` | Usage-based billing with caller-supplied reference/idempotency key |
+| One-off Charge | `charge_one_off` | Merchant-triggered ad-hoc prepaid debits |
 | Batch Charge | `batch_charge` | Bulk subscription charging |
 
 ### Allowed Operations (No Financial Risk)
@@ -137,6 +141,7 @@ These operations remain functional:
 ### Mitigation
 
 - **Idempotent Toggling**: Enabling when already enabled or disabling when already disabled is safe (no-op)
+- **Deterministic Eventing**: `EmergencyStopEnabledEvent` / `EmergencyStopDisabledEvent` are emitted only on real state transitions
 - **Comprehensive Logging**: All state changes emit events for audit trails
 - **Read-Only Access**: Queries remain functional for transparency
 

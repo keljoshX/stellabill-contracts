@@ -61,11 +61,21 @@ Pass `None` to create a subscription with no lifetime limit.
 
 ### Usage charges (`charge_usage`)
 
-Same rules apply. If `lifetime_charged + usage_amount > lifetime_cap` → subscription cancelled, `Ok(())` returned.
+1. **Pre-check**: Compute `pending = lifetime_charged + usage_amount`.
+   - If `pending > lifetime_cap` → the usage charge is **blocked**, the subscription is
+     **cancelled**, and `lifetime_cap_reached` is emitted. Returns `Ok(())`.
+2. **Post-charge**: If `pending == lifetime_cap`, the usage charge is processed normally
+   (prepaid debited, merchant credited), then the subscription is auto-cancelled and
+   `lifetime_cap_reached` is emitted.
 
 ### One-off charges (`charge_one_off`)
 
-One-off charges also count toward `lifetime_charged`. If the charge would exceed the cap, `Error::LifetimeCapReached` is returned and **no state is changed**.
+One-off charges also count toward `lifetime_charged`:
+
+- If `lifetime_charged + one_off_amount > lifetime_cap` → returns
+  `Error::LifetimeCapReached` and **no state is changed**.
+- If `lifetime_charged + one_off_amount == lifetime_cap` → charge is processed,
+  subscription is auto-cancelled, and `lifetime_cap_reached` is emitted.
 
 ---
 
@@ -127,6 +137,7 @@ let info: CapInfo = client.get_cap_info(&subscription_id);
 ### `lifetime_cap_reached`
 
 Emitted whenever a cap prevents a charge or is hit exactly after a charge.
+Exactly one cap event is emitted for a given cap-hit transition.
 
 | Field | Type | Description |
 |---|---|---|

@@ -23,7 +23,8 @@ use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent,
-    PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent, SubscriberWithdrawalEvent,
+    LifetimeCapReachedEvent, PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent,
+    SubscriberWithdrawalEvent,
     Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
     SubscriptionRecoveryReadyEvent,
     SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus,
@@ -606,6 +607,10 @@ pub fn do_charge_one_off(
         }
     }
     sub.lifetime_charged = new_charged;
+    let cap_reached = sub
+        .lifetime_cap
+        .map(|cap| sub.lifetime_charged >= cap)
+        .unwrap_or(false);
 
     sub.prepaid_balance = safe_sub(sub.prepaid_balance, amount)?;
 
@@ -616,6 +621,11 @@ pub fn do_charge_one_off(
         amount,
         BillingChargeKind::OneOff,
     )?;
+
+    if cap_reached {
+        validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
+        sub.status = SubscriptionStatus::Cancelled;
+    }
 
     env.storage().instance().set(&subscription_id, &sub);
     append_statement(
@@ -636,6 +646,20 @@ pub fn do_charge_one_off(
             amount,
         },
     );
+
+    if cap_reached {
+        if let Some(cap) = sub.lifetime_cap {
+            env.events().publish(
+                (Symbol::new(env, "lifetime_cap_reached"), subscription_id),
+                LifetimeCapReachedEvent {
+                    subscription_id,
+                    lifetime_cap: cap,
+                    lifetime_charged: sub.lifetime_charged,
+                    timestamp: now,
+                },
+            );
+        }
+    }
 
     Ok(())
 }
