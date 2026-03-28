@@ -24,6 +24,7 @@ mod state_machine;
 mod statements;
 mod subscription;
 mod types;
+mod accounting;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
@@ -124,11 +125,13 @@ impl SubscriptionVault {
     pub fn recover_stranded_funds(
         env: Env,
         admin: Address,
+        token: Address,
         recipient: Address,
         amount: i128,
+        recovery_id: String,
         reason: RecoveryReason,
     ) -> Result<(), Error> {
-        admin::do_recover_stranded_funds(&env, admin, recipient, amount, reason)
+        admin::do_recover_stranded_funds(&env, admin, token, recipient, amount, recovery_id, reason)
     }
 
     /// Charge a batch of subscriptions in one transaction. Admin only.
@@ -947,3 +950,5 @@ impl SubscriptionVault {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_recovery;

@@ -18,9 +18,9 @@ The recovery mechanism provides a last-resort option to prevent permanent fund l
 
 ### Valid Use Cases
 
-The contract defines three specific recovery reasons, each representing a well-documented scenario:
+The contract defines four specific recovery reasons, each representing a well-documented scenario:
 
-#### 1. AccidentalTransfer
+#### 1. UserOverpayment
 
 **When to use**: Tokens sent directly to the contract address by mistake, not associated with any subscription.
 
@@ -32,11 +32,11 @@ The contract defines three specific recovery reasons, each representing a well-d
 - Verify no subscription exists for the sending address
 - Confirm the funds are not part of any subscription balance
 
-#### 2. DeprecatedFlow
+#### 2. FailedTransfer
 
-**When to use**: Funds stranded due to contract upgrades, logic errors, or deprecated functionality.
+**When to use**: Funds stranded due to transfer failures or stalled in an unexpected state.
 
-**Example**: A contract upgrade changes the withdrawal flow, leaving some funds in the old storage pattern that's no longer accessible.
+**Example**: A contract upgrade changes the withdrawal flow, or an indexer missed a step, leaving some funds in an old storage pattern that's no longer accessible.
 
 **Verification steps**:
 
@@ -44,9 +44,9 @@ The contract defines three specific recovery reasons, each representing a well-d
 - Identify the exact amount and location of stranded funds
 - Confirm the funds cannot be recovered through normal contract operations
 
-#### 3. UnreachableSubscriber
+#### 3. ExpiredEscrow
 
-**When to use**: Cancelled subscriptions where the subscriber has lost access to their withdrawal keys.
+**When to use**: Cancelled subscriptions where the subscriber has lost access to their withdrawal keys or the escrow period has expired.
 
 **Example**: A subscriber cancels their subscription but loses their private key before withdrawing their prepaid balance.
 
@@ -55,6 +55,17 @@ The contract defines three specific recovery reasons, each representing a well-d
 - Confirm the subscription is in Cancelled status
 - Document evidence the subscriber has lost key access (community request, time elapsed, etc.)
 - Verify the subscriber's identity through alternative means if possible
+
+#### 4. SystemCorrection
+
+**When to use**: System or logic corrections that require manual intervention by the admin.
+
+**Example**: A bug caused an incorrect amount of tokens to be deducted from the total accounted balance, requiring an admin to recover the excess tokens.
+
+**Verification steps**:
+
+- Verify the specific system error and calculate the exact delta.
+- Document the root cause and ensure a patch is deployed.
 
 ### Invalid Use Cases
 
@@ -74,8 +85,10 @@ Recovery should **NOT** be used for:
 pub fn recover_stranded_funds(
     env: Env,
     admin: Address,
+    token: Address,
     recipient: Address,
     amount: i128,
+    recovery_id: String,
     reason: RecoveryReason,
 ) -> Result<(), Error>
 ```
@@ -100,11 +113,31 @@ if admin != stored_admin {
 
 - Amount must be positive (> 0)
 - Prevents accidental calls with zero or negative values
+- Amount must be less than or equal to the available recoverable balance
+- Recoverable balance is calculated as `actual_token_balance - total_accounted_balance` to ensure user and merchant active funds are strictly protected.
 
 ```rust
 if amount <= 0 {
     return Err(Error::InvalidRecoveryAmount);
 }
+
+let recoverable = contract_balance.checked_sub(accounted_balance)?;
+if amount > recoverable {
+    return Err(Error::InsufficientBalance);
+}
+```
+
+#### 2.1 Replay Protection
+
+- Every recovery requires a unique `recovery_id`
+- Prevents duplicate execution of the same recovery operation
+
+```rust
+let recovery_key = DataKey::Recovery(recovery_id.clone());
+if env.storage().persistent().has(&recovery_key) {
+    return Err(Error::Replay);
+}
+env.storage().persistent().set(&recovery_key, &true);
 ```
 
 #### 3. Audit Trail
@@ -112,15 +145,20 @@ if amount <= 0 {
 Every recovery operation emits a `RecoveryEvent` containing:
 
 - Admin address (who authorized)
+- Token address
 - Recipient address (where funds went)
 - Amount recovered
 - Recovery reason (why it was done)
 - Timestamp (when it occurred)
 
+**Backend Indexer Guidance**:
+Indexers should listen for the `recovery` topic. The event payload is a `RecoveryEvent` struct. Indexers should log the `recovery_id` (from transaction parameters) alongside the event to ensure a complete audit trail and match it with governance proposals.
+
 ```rust
 let recovery_event = RecoveryEvent {
     admin: admin.clone(),
     recipient: recipient.clone(),
+    token: token.clone(),
     amount,
     reason: reason.clone(),
     timestamp: env.ledger().timestamp(),
@@ -256,9 +294,9 @@ contract.events.on("recovery", (event) => {
 
 Maintain a public log of all recoveries:
 
-| Date       | Admin     | Recipient | Amount   | Reason             | Tx Hash  |
-| ---------- | --------- | --------- | -------- | ------------------ | -------- |
-| 2026-02-21 | admin.xlm | user.xlm  | 100 USDC | AccidentalTransfer | 0xabc... |
+| Date       | Admin     | Token    | Recipient | Amount   | Reason             | Tx Hash  |
+| ---------- | --------- | -------- | --------- | -------- | ------------------ | -------- |
+| 2026-03-28 | admin.xlm | USDC     | user.xlm  | 100 USDC | UserOverpayment    | 0xabc... |
 
 ### Regular Review
 
@@ -329,13 +367,15 @@ Total: 17 dedicated test cases achieving >95% coverage of recovery logic.
 ```rust
 client.recover_stranded_funds(
     &admin,
+    &usdc_token_address,
     &user_correct_address,
     &50_000000, // 50 USDC with 6 decimals
-    &RecoveryReason::AccidentalTransfer
+    &String::from_str(&env, "rec_2026_03_28_01"),
+    &RecoveryReason::UserOverpayment
 );
 ```
 
-### Example 2: Unreachable Subscriber Recovery
+### Example 2: Expired Escrow Recovery
 
 **Scenario**: Subscriber cancels but loses keys before withdrawal.
 
@@ -353,9 +393,11 @@ client.recover_stranded_funds(
 ```rust
 client.recover_stranded_funds(
     &admin,
+    &token_address,
     &subscriber_new_address,
     &remaining_balance,
-    &RecoveryReason::UnreachableSubscriber
+    &String::from_str(&env, "rec_2026_03_28_02"),
+    &RecoveryReason::ExpiredEscrow
 );
 ```
 

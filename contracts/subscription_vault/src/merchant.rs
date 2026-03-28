@@ -107,6 +107,7 @@ pub fn withdraw_merchant_funds_for_token(
     // EFFECTS: Update internal state before external interactions (CEI pattern)
     // ──────────────────────────────────────────────────────────────────────────
     set_merchant_balance(env, &merchant, &token_addr, &new_balance);
+    crate::accounting::sub_total_accounted(env, &token_addr, amount)?;
     env.events()
         .publish((Symbol::new(env, "withdrawn"), merchant.clone()), amount);
 

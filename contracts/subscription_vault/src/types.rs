@@ -39,6 +39,8 @@ pub enum DataKey {
     BillingStatement(u32, u32),
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
+    TotalAccounted(Address),
+    Recovery(String),
 }
 
 /// Represents the lifecycle state of a subscription.
@@ -515,12 +517,14 @@ pub struct EmergencyStopDisabledEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryReason {
-    /// Funds sent to contract address by mistake.
-    AccidentalTransfer = 0,
-    /// Funds from deprecated contract flows or logic errors.
-    DeprecatedFlow = 1,
-    /// Funds from cancelled subscriptions with unreachable addresses.
-    UnreachableSubscriber = 2,
+    /// Overpayment by user, e.g. sending tokens directly to the contract.
+    UserOverpayment = 0,
+    /// Transfer failed or stalled in an unexpected state.
+    FailedTransfer = 1,
+    /// Escrow expired or subscription cancelled with unreachable user.
+    ExpiredEscrow = 2,
+    /// System or logic correction.
+    SystemCorrection = 3,
 }
 
 /// Event emitted when admin recovers stranded funds.
@@ -529,6 +533,7 @@ pub enum RecoveryReason {
 pub struct RecoveryEvent {
     pub admin: Address,
     pub recipient: Address,
+    pub token: Address,
     pub amount: i128,
     pub reason: RecoveryReason,
     pub timestamp: u64,

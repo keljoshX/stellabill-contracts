@@ -997,18 +997,7 @@ fn test_replay_charge_same_period() {
 
 // -- Recovery -----------------------------------------------------------------
 
-#[test]
-fn test_recover_stranded_funds() {
-    let (env, client, _, admin) = setup_test_env();
-    let recipient = Address::generate(&env);
-    client.recover_stranded_funds(
-        &admin,
-        &recipient,
-        &1_000_000,
-        &RecoveryReason::AccidentalTransfer,
-    );
-    // No panic means success (actual transfer is TODO in admin.rs)
-}
+
 
 // -- Lifetime cap tests -------------------------------------------------------
 

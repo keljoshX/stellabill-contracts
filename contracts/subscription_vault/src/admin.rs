@@ -5,8 +5,8 @@
 #![allow(dead_code)]
 
 use crate::charge_core::charge_one;
-use crate::types::{AcceptedToken, BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use crate::types::{AcceptedToken, BatchChargeResult, Error, RecoveryEvent, RecoveryReason, DataKey};
+use soroban_sdk::{token, Address, Env, Symbol, Vec, String};
 
 fn accepted_tokens_key(env: &Env) -> Symbol {
     Symbol::new(env, "accepted_tokens")
@@ -243,8 +243,10 @@ pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) ->
 pub fn do_recover_stranded_funds(
     env: &Env,
     admin: Address,
+    token: Address,
     recipient: Address,
     amount: i128,
+    recovery_id: String,
     reason: RecoveryReason,
 ) -> Result<(), Error> {
     admin.require_auth();
@@ -263,9 +265,29 @@ pub fn do_recover_stranded_funds(
         return Err(Error::InvalidRecoveryAmount);
     }
 
+    // Check for replay protection
+    let recovery_key = DataKey::Recovery(recovery_id.clone());
+    if env.storage().persistent().has(&recovery_key) {
+        return Err(Error::Replay);
+    }
+
+    // Validate available recoverable balance
+    let token_client = token::Client::new(env, &token);
+    let contract_balance = token_client.balance(&env.current_contract_address());
+    let accounted_balance = crate::accounting::get_total_accounted(env, &token);
+    
+    let recoverable = contract_balance.checked_sub(accounted_balance).ok_or(Error::Underflow)?;
+    if amount > recoverable {
+        return Err(Error::InsufficientBalance);
+    }
+
+    // Mark recovery as executed
+    env.storage().persistent().set(&recovery_key, &true);
+
     let recovery_event = RecoveryEvent {
         admin: admin.clone(),
         recipient: recipient.clone(),
+        token: token.clone(),
         amount,
         reason,
         timestamp: env.ledger().timestamp(),
@@ -276,8 +298,8 @@ pub fn do_recover_stranded_funds(
         recovery_event,
     );
 
-    // TODO: Actual token transfer logic
-    // token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+    // Actual token transfer logic
+    token_client.transfer(&env.current_contract_address(), &recipient, &amount);
 
     Ok(())
 }
