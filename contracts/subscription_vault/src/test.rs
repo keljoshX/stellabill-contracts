@@ -1,4 +1,4 @@
-use crate::{
+use crate::{AccruedTotals, BillingChargeKind, BillingStatementAggregate,
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
     AdminRotatedEvent, ChargeExecutionResult, Error, MerchantWithdrawalEvent, OraclePrice,
     RecoveryReason, Subscription, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient,
@@ -4568,7 +4568,8 @@ fn test_rotate_admin_allowed_during_emergency_stop() {
 
 /// Patch a subscription's status directly in storage (test-only).
 fn set_status(env: &Env, client: &SubscriptionVaultClient, id: u32, status: SubscriptionStatus) {
-    let mut sub = client.get_subscription(&id);
+    let test_env = TestEnv::default();
+    let mut sub = test_env.client.get_subscription(&id);
     sub.status = status;
     env.as_contract(&client.address, || {
         env.storage().instance().set(&id, &sub);
@@ -6682,3 +6683,69 @@ fn test_oneoff_does_not_update_last_payment_timestamp() {
     let sub_after = client.get_subscription(&id);
     assert_eq!(sub_after.last_payment_timestamp, ts_before);
 }
+
+
+#[test]
+fn test_compaction_aggregation_accuracy() {
+    let test_env = TestEnv::default();
+    test_env.env.ledger().set_timestamp(T0);
+
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    test_env.stellar_token_client().mint(&subscriber, &1_000_000_000i128);
+
+    let id = test_env.client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128, // 10 USDC
+        &INTERVAL,
+        &true, // usage enabled
+        &None::<i128>,
+    );
+    test_env.client.deposit_funds(&id, &subscriber, &500_000_000i128);
+
+    // 1. Add mixed charges
+    // Interval charge
+    test_env.env.ledger().set_timestamp(T0 + INTERVAL);
+    test_env.client.charge_subscription(&id); // 10 USDC
+
+    // Usage charge
+    test_env.client.charge_usage(&id, &5_000_000i128); // 5 USDC
+
+    // One-off charge
+    test_env.client.charge_one_off(&id, &merchant, &2_000_000i128); // 2 USDC
+
+    // Another interval charge
+    test_env.env.ledger().set_timestamp(T0 + 2 * INTERVAL);
+    test_env.client.charge_subscription(&id); // 10 USDC (sequence 3)
+    
+    // Total charged so far: 10 + 5 + 2 + 10 = 27 USDC
+    // Sequences: 0 (Interval), 1 (Usage), 2 (OneOff), 3 (Interval)
+
+    // 2. Compact first 3 rows
+    test_env.client.set_billing_retention(&test_env.admin, &1);
+    let summary = test_env.client.compact_billing_statements(&test_env.admin, &id, &None::<u32>);
+    
+    assert_eq!(summary.pruned_count, 3);
+    assert_eq!(summary.total_pruned_amount, 17_000_000i128);
+
+    let agg = test_env.client.get_stmt_compacted_aggregate(&id);
+    assert_eq!(agg.pruned_count, 3);
+    assert_eq!(agg.total_amount, 17_000_000i128);
+    assert_eq!(agg.totals.interval, 10_000_000i128);
+    assert_eq!(agg.totals.usage, 5_000_000i128);
+    assert_eq!(agg.totals.one_off, 2_000_000i128);
+
+    // 3. Verify consistency
+    let sub = test_env.client.get_subscription(&id);
+    let live_page = test_env.client.get_sub_statements_offset(&id, &0, &10, &false);
+    let mut live_total = 0i128;
+    for stmt in live_page.statements.iter() {
+        live_total += stmt.amount;
+    }
+    
+    assert_eq!(agg.total_amount + live_total, sub.lifetime_charged);
+    assert_eq!(sub.lifetime_charged, 27_000_000i128);
+}
+
+

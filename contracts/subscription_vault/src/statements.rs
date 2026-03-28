@@ -1,8 +1,8 @@
 //! Billing statement append-only storage, pagination, and compaction.
 
 use crate::types::{
-    BillingChargeKind, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
-    BillingStatementAggregate, BillingStatementsPage, Error,
+    AccruedTotals, BillingChargeKind, BillingCompactionSummary, BillingRetentionConfig,
+    BillingStatement, BillingStatementAggregate, BillingStatementsPage, Error,
 };
 use crate::safe_math::{safe_add, safe_sub};
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
@@ -54,6 +54,11 @@ pub fn get_compacted_aggregate(env: &Env, subscription_id: u32) -> BillingStatem
         .unwrap_or(BillingStatementAggregate {
             pruned_count: 0,
             total_amount: 0,
+            totals: AccruedTotals {
+                interval: 0,
+                usage: 0,
+                one_off: 0,
+            },
             oldest_period_start: None,
             newest_period_end: None,
         })
@@ -127,10 +132,19 @@ pub fn compact_subscription_statements(
     let mut newest: Option<u64> = None;
 
     let mut seq = 0u32;
+    let mut interval_amt = 0i128;
+    let mut usage_amt = 0i128;
+    let mut one_off_amt = 0i128;
+
     while seq < next && removed < target_pruned {
         let key = statement_row_key(subscription_id, seq);
         if let Some(row) = storage.get::<_, BillingStatement>(&key) {
             amount = safe_add(amount, row.amount)?;
+            match row.kind {
+                BillingChargeKind::Interval => interval_amt = safe_add(interval_amt, row.amount)?,
+                BillingChargeKind::Usage => usage_amt = safe_add(usage_amt, row.amount)?,
+                BillingChargeKind::OneOff => one_off_amt = safe_add(one_off_amt, row.amount)?,
+            }
             oldest = match oldest {
                 Some(v) => Some(v.min(row.period_start)),
                 None => Some(row.period_start),
@@ -145,9 +159,18 @@ pub fn compact_subscription_statements(
         seq += 1;
     }
 
+    // Consistency check
+    if amount != (safe_add(safe_add(interval_amt, usage_amt)?, one_off_amt)?) {
+         return Err(Error::Underflow); // Or some other appropriate error
+    }
+
     let mut aggregate = get_compacted_aggregate(env, subscription_id);
     aggregate.pruned_count = (safe_add(aggregate.pruned_count as i128, removed as i128).unwrap_or(0)) as u32;
     aggregate.total_amount = safe_add(aggregate.total_amount, amount)?;
+    aggregate.totals.interval = safe_add(aggregate.totals.interval, interval_amt)?;
+    aggregate.totals.usage = safe_add(aggregate.totals.usage, usage_amt)?;
+    aggregate.totals.one_off = safe_add(aggregate.totals.one_off, one_off_amt)?;
+    
     aggregate.oldest_period_start = match (aggregate.oldest_period_start, oldest) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (None, Some(b)) => Some(b),

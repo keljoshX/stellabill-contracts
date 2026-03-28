@@ -538,13 +538,13 @@ pub fn do_charge_one_off(
     }
 
     // Enforce lifetime cap for one-off charges
+    let new_charged = safe_add(sub.lifetime_charged, amount)?;
     if let Some(cap) = sub.lifetime_cap {
-        let new_charged = safe_add(sub.lifetime_charged, amount)?;
         if new_charged > cap {
             return Err(Error::LifetimeCapReached);
         }
-        sub.lifetime_charged = new_charged;
     }
+    sub.lifetime_charged = new_charged;
 
     sub.prepaid_balance = safe_sub(sub.prepaid_balance, amount)?;
 

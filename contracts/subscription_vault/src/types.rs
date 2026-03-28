@@ -509,6 +509,7 @@ pub struct BillingRetentionConfig {
 pub struct BillingStatementAggregate {
     pub pruned_count: u32,
     pub total_amount: i128,
+    pub totals: AccruedTotals,
     pub oldest_period_start: Option<u64>,
     pub newest_period_end: Option<u64>,
 }
