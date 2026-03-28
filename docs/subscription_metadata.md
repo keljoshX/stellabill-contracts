@@ -74,6 +74,13 @@ Metadata is stored in instance storage using composite keys:
 Storage is bounded: at most 10 keys per subscription, with each key <= 32 bytes
 and each value <= 256 bytes. Worst-case per subscription: ~3 KB.
 
+## Schema recommendations (off-chain)
+
+- Prefer short ASCII keys (e.g. `invoice_id`, `external_ref`) so they stay within the 32-byte key limit and remain easy to query in indexers.
+- Values should be opaque identifiers or tags, not structured blobs; keep under 256 bytes so updates stay cheap.
+- Treat keys as case-sensitive; normalize casing off-chain to avoid duplicate-looking keys (`INV` vs `inv`).
+- After deleting optional keys, you may re-add up to the 10-key cap; updates to an existing key do not consume a new slot.
+
 ## Recommended Fields
 
 Use metadata for lightweight off-chain references:

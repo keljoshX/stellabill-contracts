@@ -339,6 +339,15 @@ cargo test -p subscription_vault test_usage_enabled
 cargo test -p subscription_vault test_create_subscription_with_usage
 ```
 
+## Operational Rollback Patterns
+
+If a plan template is accidentally created with the wrong `usage_enabled` value, it cannot be corrected via `update_plan_template` due to strict immutability checks protecting downstream subscribers from accidental charging configuration shifts. To correct this operational error, follow this sequence:
+
+1. **Deprecate the Erroneous Plan**: Call `set_plan_max_active_subs` setting `max_active = 0` to prevent any new subscribers from adopting the incorrect billing model.
+2. **Issue Replacement Plan**: Create a completely new plan template using `create_plan_template` with the correct `usage_enabled` flag.
+3. **Notify Subscribers**: Existing subscribers on the erroneous plan cannot be migrated automatically via `migrate_subscription_to_plan`. Direct them to cancel their old subscriptions and subscribe manually to the replacement.
+4. **Issue Partial Refunds**: Contract logic supports `partial_refund` enabling Admins to return prepaid balances to users who were forced to cancel fixed-rate plans to transition back effectively.
+
 ## API Reference
 
 ### Creating Subscriptions

@@ -34,3 +34,11 @@ Read aggregate with `get_stmt_compacted_aggregate(subscription_id)`.
 
 - Choose `keep_recent` to match frontend history window (for example, 12-24 periods).
 - Run compaction periodically for high-volume subscriptions.
+
+## Security and operations
+
+- Only the contract admin may call `set_billing_retention` and `compact_billing_statements` (see `require_admin_auth` in the vault). Holders of other roles cannot change retention or prune history.
+- `keep_recent == 0` is allowed: a compaction run can remove **all** detailed rows for a subscription while cumulative pruned amounts and period bounds remain in `BillingStatementAggregate` (via `get_stmt_compacted_aggregate`).
+- Each successful compaction emits `billing_compacted` with a summary that includes run totals (`pruned_count`, `kept_count`, `total_pruned_amount`) and the post-run aggregate (`aggregate_*` fields) so indexers can reconcile against `get_stmt_compacted_aggregate` without extra reads.
+- Repeated compaction with the same effective threshold is a no-op (zero rows pruned) once the live row count is at or below the keep threshold—safe to run on a schedule.
+- When tuning retention in production, prefer staged changes (set default policy, then compact high-traffic subscriptions with `keep_recent_override` before lowering the global default) so operators can validate exports and dashboards.

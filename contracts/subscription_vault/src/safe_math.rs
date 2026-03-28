@@ -30,7 +30,13 @@ use crate::types::Error;
 /// Compatible with USDC-style fixed decimals (6 decimals). For example,
 /// 1 USDC = 1_000_000 smallest units, 1000 USDC = 1_000_000_000.
 pub fn safe_add(a: i128, b: i128) -> Result<i128, Error> {
-    a.checked_add(b).ok_or(Error::Overflow)
+    a.checked_add(b).ok_or_else(|| {
+        if a > 0 {
+            Error::Overflow
+        } else {
+            Error::Underflow
+        }
+    })
 }
 
 /// Safely subtracts two i128 values, preventing underflow.
@@ -63,7 +69,13 @@ pub fn safe_add(a: i128, b: i128) -> Result<i128, Error> {
 /// Compatible with USDC-style fixed decimals (6 decimals). For example,
 /// 1 USDC = 1_000_000 smallest units, 1000 USDC = 1_000_000_000.
 pub fn safe_sub(a: i128, b: i128) -> Result<i128, Error> {
-    a.checked_sub(b).ok_or(Error::Underflow)
+    a.checked_sub(b).ok_or_else(|| {
+        if a >= 0 {
+            Error::Overflow
+        } else {
+            Error::Underflow
+        }
+    })
 }
 
 /// Validates that an amount is non-negative.
@@ -190,3 +202,70 @@ pub fn safe_sub_balance(balance: i128, amount: i128) -> Result<i128, Error> {
         Ok(result)
     }
 }
+
+/// Safely multiplies two i128 values, preventing overflow.
+pub fn safe_mul(a: i128, b: i128) -> Result<i128, Error> {
+    a.checked_mul(b).ok_or_else(|| {
+        if (a > 0 && b > 0) || (a < 0 && b < 0) {
+            Error::Overflow
+        } else {
+            Error::Underflow
+        }
+    })
+}
+
+/// Safely divides two i128 values, preventing division by zero and underflow.
+pub fn safe_div(a: i128, b: i128) -> Result<i128, Error> {
+    if b == 0 {
+        return Err(Error::InvalidInput);
+    }
+    // checked_div only fails for MIN / -1 (Overflow)
+    a.checked_div(b).ok_or(Error::Overflow)
+}
+
+/// Safely calculates power of an i128 value, preventing overflow.
+pub fn safe_pow(base: i128, exp: u32) -> Result<i128, Error> {
+    base.checked_pow(exp).ok_or_else(|| {
+        if base > 0 || exp % 2 == 0 {
+            Error::Overflow
+        } else {
+            Error::Underflow
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safe_add() {
+        assert_eq!(safe_add(10, 20).unwrap(), 30);
+        assert_eq!(safe_add(i128::MAX, 1), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn test_safe_sub() {
+        assert_eq!(safe_sub(30, 10).unwrap(), 20);
+        assert_eq!(safe_sub(i128::MIN, 1), Err(Error::Underflow));
+    }
+
+    #[test]
+    fn test_safe_mul() {
+        assert_eq!(safe_mul(10, 20).unwrap(), 200);
+        assert_eq!(safe_mul(i128::MAX, 2), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn test_safe_div() {
+        assert_eq!(safe_div(40, 2).unwrap(), 20);
+        assert_eq!(safe_div(10, 0), Err(Error::InvalidInput));
+    }
+
+    #[test]
+    fn test_safe_pow() {
+        assert_eq!(safe_pow(10, 3).unwrap(), 1000);
+        assert_eq!(safe_pow(10, 40), Err(Error::Overflow));
+    }
+}
+

@@ -28,3 +28,10 @@ Read-only helper to compute how much additional prepaid balance is required to c
 
 - Does not account for future charges that might occur before the user tops up; it is a snapshot.
 - Assumes `amount` and `prepaid_balance` are in the same token base units (e.g. 6 decimals for USDC).
+
+## Forecast tolerances
+
+- `estimate_topup_for_intervals` is an exact arithmetic estimate based on the subscription's current `amount` and `prepaid_balance`. There is no rounding tolerance.
+- `compute_next_charge_info` returns `next_charge_timestamp = last_payment_timestamp + interval_seconds`.
+  - Charging eligibility uses an inclusive boundary (`now >= next_charge_timestamp`).
+  - Late charges shift the schedule because on success `last_payment_timestamp` is set to `now` (not the prior boundary).

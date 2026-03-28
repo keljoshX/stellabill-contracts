@@ -33,12 +33,12 @@ The integration interacts with specific functions defined in `contracts/subscrip
    - **Errors to handle:** 
      - `Error::IntervalNotElapsed` (1001) if called too early.
      - `Error::NotActive` (1002) if paused or cancelled.
-     - `Error::InsufficientBalance` (1003) if the prepaid balance is too low.
+   - **Insufficient-balance behavior:** Underfunded attempts do not debit funds or append charge statements. Instead, status is persisted to `GracePeriod` (while grace is active) or `InsufficientBalance`, and a `charge_failed` event is emitted.
 
 2. **`batch_charge(env: Env, subscription_ids: Vec<u32>) -> Result<Vec<BatchChargeResult>, Error>`**
    - **Purpose:** Process multiple subscriptions in a single transaction. Recommended for efficiency.
    - **Parameters:** A vector of `subscription_id`s.
-   - **Returns:** A vector of `BatchChargeResult` objects `{ success: bool, error_code: u32 }`. If `success` is false, `error_code` reflects why the individual charge failed. The transaction *does not revert* if a single charge within the batch fails.
+   - **Returns:** A vector of `BatchChargeResult` objects `{ success: bool, error_code: u32 }`. If `success` is false, `error_code` reflects why the individual charge failed (for example `1003` when an underfunded subscription is moved to recoverable state).
    - **Authorization:** Requires the signature of the `admin` address.
 
 ### For Indexers & UIs (View Helpers)
@@ -63,7 +63,8 @@ The integration interacts with specific functions defined in `contracts/subscrip
 1. **Identify targets:** The backend queries its database (populated by the indexer) to find `subscription_id`s where `current_time >= last_payment_timestamp + interval_seconds` and `status == Active`.
 2. **Execute charge:** The billing engine constructs a `batch_charge` transaction with up to ~50-100 IDs (depending on network limits) and submits it to the Stellar network.
 3. **Handle results:** The backend parses the returned `Vec<BatchChargeResult>`. 
-   - If a charge fails with `InsufficientBalance` (1003), the backend should trigger a notification to the user to top-up, and optionally transition the subscription to a paused/failed state if policy dictates.
+   - If a charge fails with `InsufficientBalance` (1003), the backend should notify the subscriber to top up. The contract has already moved the subscription into a recoverable underfunded state.
+   - After top-up, the backend should instruct the subscriber/merchant to call `resume_subscription`. Resume from underfunded states succeeds only when `prepaid_balance >= amount`.
 
 ### 3. Merchant Withdrawals
 Merchants call `withdraw_merchant_funds(merchant: Address, amount: i128)` to claim their revenue. Backend systems do not need to trigger this, but indexers should listen for the withdrawal events to update merchant balance displays.
@@ -97,4 +98,4 @@ Transactions on Soroban require sequence numbers, providing baseline protection 
 Because `batch_charge` does not revert the entire transaction if one sub-charge fails, you must parse the result array.
 - Code `404` (NotFound): The subscription ID doesn't exist. Remove it from your billing queue.
 - Code `1002` (NotActive): The user paused or cancelled. Suspend billing attempts.
-- Code `1003` (InsufficientBalance): Keep in queue, but alert the user. Do not attempt to charge again until the indexer detects a `deposit_funds` action.
+- Code `1003` (InsufficientBalance): Keep in queue, alert the user, and watch for `recovery_ready` / `deposited` signals. Resume must be called before recurring charges will succeed again.

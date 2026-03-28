@@ -36,7 +36,10 @@ pub enum DataKey {
     IdemKey(u32),
     /// Emergency stop flag - when true, critical operations are blocked. Discriminant 9.
     EmergencyStop,
+    /// Merchant-wide pause flag.
+    MerchantPaused(Address),
     BillingStatement(u32, u32),
+
     BillingStatementsBySubscription(u32),
     BillingStatementsByMerchant(Address),
     TotalAccounted(Address),
@@ -60,7 +63,7 @@ pub enum DataKey {
 /// - **GracePeriod**: Subscription is in grace period after a missed charge.
 ///   - Can transition to: `Active`, `InsufficientBalance`, `Cancelled`
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubscriptionStatus {
     /// Subscription is active and ready for charging.
     Active = 0,
@@ -157,7 +160,7 @@ impl InsufficientBalanceError {
 }
 
 #[contracterror]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
     // --- Auth Errors (401-403) ---
@@ -219,6 +222,8 @@ pub enum Error {
     LifetimeCapReached = 1017,
     /// Contract is already initialized; init may only be called once.
     AlreadyInitialized = 1018,
+    /// Merchant-wide pause is active for this subscription.
+    MerchantPaused = 1019,
 
     // --- Metadata Errors (1023-1025) ---
     /// Metadata key limit reached for this subscription.
@@ -248,6 +253,16 @@ pub enum Error {
     MaxConcurrentSubscriptionsReached = 1031,
     /// Subscriber's configured credit limit would be exceeded.
     CreditLimitExceeded = 1032,
+    /// Usage rate limit exceeded for the current window.
+    RateLimitExceeded = 1033,
+    /// Usage charge would exceed the per-period cap.
+    UsageCapExceeded = 1034,
+    /// Usage charge attempted too soon after previous charge (burst protection).
+    BurstLimitExceeded = 1035,
+    /// Rotation to the same admin address is not allowed.
+    SelfRotation = 1036,
+    /// The provided new admin address is invalid.
+    InvalidNewAdmin = 1037,
 }
 
 impl Error {
@@ -278,6 +293,7 @@ impl Error {
             Error::Reentrancy => 1016,
             Error::LifetimeCapReached => 1017,
             Error::AlreadyInitialized => 1018,
+            Error::MerchantPaused => 1019,
             Error::MetadataKeyLimitReached => 1023,
             Error::MetadataKeyTooLong => 1024,
             Error::MetadataValueTooLong => 1025,
@@ -289,6 +305,11 @@ impl Error {
             Error::SubscriptionLimitReached => 429,
             Error::MaxConcurrentSubscriptionsReached => 1031,
             Error::CreditLimitExceeded => 1032,
+            Error::RateLimitExceeded => 1033,
+            Error::UsageCapExceeded => 1034,
+            Error::BurstLimitExceeded => 1035,
+            Error::SelfRotation => 1036,
+            Error::InvalidNewAdmin => 1037,
         }
     }
 }
@@ -415,7 +436,7 @@ pub struct CapInfo {
 
 /// Canonical charge category used for billing statement history.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BillingChargeKind {
     Interval = 0,
     Usage = 1,
@@ -481,6 +502,9 @@ pub struct BillingCompactionSummary {
 }
 
 /// Event emitted when statement compaction executes.
+///
+/// `aggregate_*` fields mirror [`BillingStatementAggregate`] after this run so indexers can
+/// verify on-chain totals without a follow-up `get_stmt_compacted_aggregate` call (optional).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BillingCompactedEvent {
@@ -490,6 +514,10 @@ pub struct BillingCompactedEvent {
     pub kept_count: u32,
     pub total_pruned_amount: i128,
     pub timestamp: u64,
+    pub aggregate_pruned_count: u32,
+    pub aggregate_total_amount: i128,
+    pub aggregate_oldest_period_start: Option<u64>,
+    pub aggregate_newest_period_end: Option<u64>,
 }
 
 /// Optional oracle pricing configuration for cross-currency plans.
@@ -525,6 +553,15 @@ pub struct AcceptedToken {
 #[derive(Clone, Debug)]
 pub struct EmergencyStopEnabledEvent {
     pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Event emitted when admin is rotated to a new address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminRotatedEvent {
+    pub old_admin: Address,
+    pub new_admin: Address,
     pub timestamp: u64,
 }
 
@@ -582,6 +619,7 @@ pub struct FundsDepositedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
     pub amount: i128,
+    pub prepaid_balance: i128,
 }
 
 /// Event emitted when a subscription interval charge succeeds.
@@ -592,6 +630,32 @@ pub struct SubscriptionChargedEvent {
     pub merchant: Address,
     pub amount: i128,
     pub lifetime_charged: i128,
+}
+
+/// Event emitted when an interval charge attempt cannot be completed due to
+/// insufficient prepaid balance.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionChargeFailedEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub required_amount: i128,
+    pub available_balance: i128,
+    pub shortfall: i128,
+    pub resulting_status: SubscriptionStatus,
+    pub timestamp: u64,
+}
+
+/// Event emitted after a deposit when a previously underfunded subscription is
+/// ready to be resumed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionRecoveryReadyEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub prepaid_balance: i128,
+    pub required_amount: i128,
+    pub timestamp: u64,
 }
 
 /// Event emitted when a subscription is cancelled.
@@ -640,6 +704,17 @@ pub struct SubscriptionArchivedEvent {
 #[derive(Clone, Debug)]
 pub struct MerchantWithdrawalEvent {
     pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub remaining_balance: i128,
+}
+
+/// Event emitted when a subscriber withdraws funds after cancellation.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriberWithdrawalEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
     pub amount: i128,
 }
 
@@ -704,6 +779,22 @@ pub struct PlanTemplateUpdatedEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when a plan's max-active-subscriptions limit is configured.
+///
+/// A `max_active` value of `0` means "no limit enforced".
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PlanMaxActiveUpdatedEvent {
+    /// Plan template whose limit was changed.
+    pub plan_template_id: u32,
+    /// Merchant that owns the plan and authorized the change.
+    pub merchant: Address,
+    /// New limit value (`0` = unlimited).
+    pub max_active: u32,
+    /// Ledger timestamp when the change was applied.
+    pub timestamp: u64,
+}
+
 /// Event emitted when a subscription is migrated from one plan template
 /// version to another.
 #[contracttype]
@@ -724,6 +815,44 @@ pub struct SubscriptionMigratedEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when a usage statement is logged.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UsageStatementEvent {
+    pub subscription_id: u32,
+    pub merchant: Address,
+    pub usage_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+    pub reference: String,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChargeExecutionResult {
+    Charged = 0,
+    InsufficientBalance = 1,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageLimits {
+    pub rate_limit_max_calls: Option<u32>,
+    pub rate_window_secs: u64,
+    pub burst_min_interval_secs: u64,
+    pub usage_cap_units: Option<i128>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageState {
+    pub last_usage_timestamp: u64,
+    pub window_start_timestamp: u64,
+    pub window_call_count: u32,
+    pub current_period_usage_units: i128,
+    pub period_index: u64,
+}
+
 /// Event emitted when a partial refund is processed for a subscription.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -733,5 +862,39 @@ pub struct PartialRefundEvent {
     /// Subscriber who receives the refunded amount.
     pub subscriber: Address,
     /// Amount refunded in token base units.
+    pub amount: i128,
+    /// Ledger timestamp when the refund was processed.
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MerchantConfig {
+    pub fee_address: Option<Address>,
+    pub redirect_url: String, // e.g., for off-chain success callbacks
+    pub is_paused: bool,      // Global pause for all merchant plans
+}
+
+/// Event emitted when a merchant enables their blanket pause.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantPausedEvent {
+    pub merchant: Address,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a merchant disables their blanket pause.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantUnpausedEvent {
+    pub merchant: Address,
+    pub timestamp: u64,
+}
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerchantRefundEvent {
+    pub merchant: Address,
+    pub subscriber: Address,
+    pub token: Address,
     pub amount: i128,
 }
