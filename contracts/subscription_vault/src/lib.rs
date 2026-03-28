@@ -43,6 +43,8 @@ mod test_security;
 mod test_safe_math_regression;
 #[cfg(test)]
 mod test_usage_limits;
+#[cfg(test)]
+mod test_deterministic_charging;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
