@@ -268,4 +268,3 @@ mod tests {
         assert_eq!(safe_pow(10, 40), Err(Error::Overflow));
     }
 }
-

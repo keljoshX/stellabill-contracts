@@ -5,7 +5,7 @@ const DEFAULT_AMOUNT: i128 = 10_000_000;
 const DEFAULT_INTERVAL: u64 = 30 * 24 * 60 * 60;
 
 /// Create a test subscription with the given status and default amount/interval.
-/// 
+///
 /// Alias for `create_test_subscription` to match naming in some tests.
 pub fn create_subscription(
     env: &Env,

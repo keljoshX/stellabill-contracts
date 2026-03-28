@@ -86,17 +86,16 @@ mod statements;
 mod subscription;
 #[cfg(test)]
 mod test;
-mod types;
-#[cfg(test)]
-mod test_refactor_check;
-#[cfg(test)]
-mod test_utils;
 #[cfg(test)]
 mod test_governance;
 #[cfg(test)]
 mod test_insufficient_balance;
 #[cfg(test)]
+mod test_refactor_check;
+#[cfg(test)]
 mod test_security;
+#[cfg(test)]
+mod test_multi_actor;
 #[cfg(test)]
 mod test_safe_math_regression;
 #[cfg(test)]
@@ -111,18 +110,18 @@ pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
 pub use queries::{compute_next_charge_info, MAX_SUBSCRIPTION_LIST_PAGE};
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    AcceptedToken, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
-    BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
-    BillingStatementAggregate, BillingStatementsPage, CapInfo, ChargeExecutionResult, ContractSnapshot, DataKey,
-    EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent,
-    MetadataDeletedEvent, MetadataSetEvent, MigrationExportEvent, NextChargeInfo,
-    OneOffChargedEvent, OracleConfig, OraclePrice, PartialRefundEvent, PlanTemplate,
-    PlanTemplateUpdatedEvent, RecoveryEvent, RecoveryReason, Subscription,
-    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionChargeFailedEvent, SubscriptionCreatedEvent,
-    SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent,
-    SubscriptionStatus, SubscriptionSummary, UsageLimits, UsageState, UsageStatementEvent,
-    AccruedTotals, MerchantConfig, TokenEarnings, TokenReconciliationSnapshot,
+    AcceptedToken, AccruedTotals, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult,
+    BillingChargeKind, BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig,
+    BillingStatement, BillingStatementAggregate, BillingStatementsPage, CapInfo,
+    ChargeExecutionResult, ContractSnapshot, DataKey, EmergencyStopDisabledEvent,
+    EmergencyStopEnabledEvent, Error, FundsDepositedEvent, LifetimeCapReachedEvent, MerchantConfig,
+    MerchantPausedEvent, MerchantUnpausedEvent, MerchantWithdrawalEvent, MetadataDeletedEvent,
+    MetadataSetEvent, MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, OracleConfig,
+    OraclePrice, PartialRefundEvent, PlanTemplate, PlanTemplateUpdatedEvent, RecoveryEvent,
+    RecoveryReason, Subscription, SubscriptionCancelledEvent, SubscriptionChargeFailedEvent,
+    SubscriptionChargedEvent, SubscriptionCreatedEvent, SubscriptionMigratedEvent,
+    SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
+    TokenEarnings, TokenReconciliationSnapshot, UsageLimits, UsageState, UsageStatementEvent,
     MAX_METADATA_KEYS, MAX_METADATA_KEY_LENGTH, MAX_METADATA_VALUE_LENGTH,
 };
 
@@ -1138,7 +1137,10 @@ impl SubscriptionVault {
     /// Enforces strict interval timing and replay protection. Underfunded attempts
     /// move the subscription into a recoverable non-active state and emit a
     /// charge-failed event without mutating financial accounting fields.
-    pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<ChargeExecutionResult, Error> {
+    pub fn charge_subscription(
+        env: Env,
+        subscription_id: u32,
+    ) -> Result<ChargeExecutionResult, Error> {
         require_not_emergency_stop(&env)?;
         charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
     }

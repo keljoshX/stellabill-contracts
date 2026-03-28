@@ -22,10 +22,12 @@ use crate::safe_math::{safe_add, safe_add_balance, safe_sub, validate_non_negati
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent, PlanTemplate,
-    PlanTemplateUpdatedEvent, PlanMaxActiveUpdatedEvent, SubscriberWithdrawalEvent, Subscription,
-    SubscriptionCancelledEvent, SubscriptionMigratedEvent, SubscriptionRecoveryReadyEvent,
-    SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus, UsageLimits, UsageState,
+    BillingChargeKind, DataKey, Error, FundsDepositedEvent, PartialRefundEvent,
+    PlanMaxActiveUpdatedEvent, PlanTemplate, PlanTemplateUpdatedEvent, SubscriberWithdrawalEvent,
+    Subscription, SubscriptionCancelledEvent, SubscriptionMigratedEvent,
+    SubscriptionRecoveryReadyEvent,
+    SubscriptionRecoveryReadyEvent as SubscriptionRecoveryReadyEventAlias, SubscriptionStatus,
+    UsageLimits, UsageState,
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
@@ -43,7 +45,9 @@ pub fn next_id(env: &Env) -> u32 {
 pub fn next_plan_id(env: &Env) -> u32 {
     let key = Symbol::new(env, "next_plan_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
-    env.storage().instance().set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
+    env.storage()
+        .instance()
+        .set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
     id
 }
 
@@ -281,7 +285,9 @@ pub fn do_create_subscription_with_token(
     if id == crate::MAX_SUBSCRIPTION_ID {
         return Err(Error::SubscriptionLimitReached);
     }
-    env.storage().instance().set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
+    env.storage()
+        .instance()
+        .set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
 
     env.storage().instance().set(&id, &sub);
 
@@ -869,7 +875,9 @@ pub fn do_create_subscription_from_plan(
 
     let key = Symbol::new(env, "next_id");
     let id: u32 = env.storage().instance().get(&key).unwrap_or(0);
-    env.storage().instance().set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
+    env.storage()
+        .instance()
+        .set(&key, &(safe_add(id as i128, 1).unwrap_or(0) as u32));
 
     let sub = Subscription {
         subscriber: subscriber.clone(),

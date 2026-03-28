@@ -13,8 +13,8 @@
 //!   use [`get_merchant_subscription_count`] or [`get_token_subscription_count`] for the index
 //!   length, not `result.len()`, when paginating.
 
-use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
 use crate::safe_math::{safe_mul, safe_sub};
+use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 /// Maximum `limit` for [`get_subscriptions_by_merchant`] and [`get_subscriptions_by_token`]
