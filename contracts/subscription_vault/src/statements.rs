@@ -72,7 +72,19 @@ pub fn append_statement(
     kind: BillingChargeKind,
     period_start: u64,
     period_end: u64,
-) {
+) -> Result<(), Error> {
+    // Invariants for period start/end boundaries
+    if period_start > period_end {
+        return Err(Error::InvalidInput);
+    }
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    // For interval charges, ensure period spans time
+    if kind == BillingChargeKind::Interval && period_start == period_end {
+        return Err(Error::InvalidInput);
+    }
+
     let storage = env.storage().instance();
     let next: u32 = storage
         .get(&next_statement_key(subscription_id))
@@ -99,6 +111,7 @@ pub fn append_statement(
         &live_statement_key(subscription_id),
         &(safe_add(live as i128, 1).unwrap_or(0) as u32),
     );
+    Ok(())
 }
 
 pub fn get_total_statements(env: &Env, subscription_id: u32) -> u32 {

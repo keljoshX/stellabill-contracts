@@ -7445,7 +7445,7 @@ fn test_offset_pagination_ordering_newest_first() {
                 crate::types::BillingChargeKind::Interval,
                 i as u64,
                 i as u64 + 10,
-            );
+            ).unwrap();
         });
     }
 
@@ -7473,7 +7473,7 @@ fn test_offset_pagination_ordering_oldest_first() {
                 crate::types::BillingChargeKind::Interval,
                 i as u64,
                 i as u64 + 10,
-            );
+            ).unwrap();
         });
     }
 
@@ -7499,7 +7499,7 @@ fn test_cursor_pagination_continuity() {
                 crate::types::BillingChargeKind::Interval,
                 i as u64,
                 i as u64 + 10,
-            );
+            ).unwrap();
         });
     }
 
@@ -7541,7 +7541,7 @@ fn test_cursor_termination() {
                 crate::types::BillingChargeKind::Interval,
                 i as u64,
                 i as u64 + 10,
-            );
+            ).unwrap();
         }
     });
 
@@ -8030,6 +8030,89 @@ fn test_compaction_aggregation_accuracy() {
     
     assert_eq!(agg.total_amount + live_total, sub.lifetime_charged);
     assert_eq!(sub.lifetime_charged, 27_000_000i128);
+}
+
+#[test]
+fn test_append_statement_invalid_period_start_after_end() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let sub_id = 1u32;
+
+    let result = env.as_contract(&client.address, || {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Interval,
+            10,
+            5, // period_start > period_end
+        )
+    });
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Error::InvalidInput);
+}
+
+#[test]
+fn test_append_statement_invalid_amount_zero() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let sub_id = 1u32;
+
+    let result = env.as_contract(&client.address, || {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            0,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Usage,
+            5,
+            5,
+        )
+    });
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Error::InvalidAmount);
+}
+
+#[test]
+fn test_append_statement_invalid_interval_same_period() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let sub_id = 1u32;
+
+    let result = env.as_contract(&client.address, || {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Interval,
+            5,
+            5, // period_start == period_end for interval
+        )
+    });
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), Error::InvalidInput);
+}
+
+#[test]
+fn test_append_statement_valid_usage_same_period() {
+    let (env, client, _token, _admin) = setup_test_env();
+    let sub_id = 1u32;
+
+    let result = env.as_contract(&client.address, || {
+        crate::statements::append_statement(
+            &env,
+            sub_id,
+            1000,
+            Address::generate(&env),
+            crate::types::BillingChargeKind::Usage,
+            5,
+            5, // allowed for usage
+        )
+    });
+
+    assert!(result.is_ok());
 }
 
 
