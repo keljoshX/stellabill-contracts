@@ -71,6 +71,7 @@
 //! - `docs/subscription_metadata.md`
 
 // ── Modules ──────────────────────────────────────────────────────────────────
+mod accounting;
 mod admin;
 mod blocklist;
 mod charge_core;
@@ -84,6 +85,7 @@ pub mod safe_math;
 mod state_machine;
 mod statements;
 mod subscription;
+mod types;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
@@ -102,12 +104,14 @@ mod test_safe_math_regression;
 mod test_usage_limits;
 #[cfg(test)]
 mod test_deterministic_charging;
+#[cfg(test)]
+mod test_query_performance;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use blocklist::{BlocklistAddedEvent, BlocklistEntry, BlocklistRemovedEvent};
-pub use queries::{compute_next_charge_info, MAX_SUBSCRIPTION_LIST_PAGE};
+pub use queries::{compute_next_charge_info, MAX_SCAN_DEPTH, MAX_SUBSCRIPTION_LIST_PAGE};
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
     AcceptedToken, AccruedTotals, AdminRotatedEvent, BatchChargeResult, BatchWithdrawResult,
