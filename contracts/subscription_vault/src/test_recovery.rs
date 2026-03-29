@@ -78,14 +78,7 @@ fn test_recovery_unauthorized() {
 
     let recovery_id = String::from_str(&env, "rec_unauth");
     
-    let result = client.try_recover_stranded_funds(
-        &fake_admin,
-        &token,
-        &recipient,
-        &10_000_000,
-        &recovery_id,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&fake_admin, &token, &recipient, &10_000_000, &recovery_id, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::Forbidden)));
 }
 
@@ -99,38 +92,18 @@ fn test_recovery_amount_validation() {
 
     // Zero amount
     let rec_zero = String::from_str(&env, "rec_zero");
-    let result = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &0,
-        &rec_zero,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&admin, &token, &recipient, &0, &rec_zero, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::InvalidRecoveryAmount)));
 
     // Negative amount
     let rec_neg = String::from_str(&env, "rec_neg");
-    let result = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &-100,
-        &rec_neg,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&admin, &token, &recipient, &-100, &rec_neg, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::InvalidRecoveryAmount)));
 
     // Overdraw
     let rec_over = String::from_str(&env, "rec_over");
-    let result = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &200_000_000, // Contract only has 100M
-        &rec_over,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&admin, &token, &recipient, &200_000_000, // Contract only has 100M
+        &rec_over, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
 }
 
@@ -145,24 +118,10 @@ fn test_recovery_replay_protection() {
     let recovery_id = String::from_str(&env, "rec_replay");
     
     // First call succeeds
-    client.recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &10_000_000,
-        &recovery_id,
-        &RecoveryReason::UserOverpayment,
-    );
+    client.recover_stranded_funds(&admin, &token, &recipient, &10_000_000, &recovery_id, &RecoveryReason::UserOverpayment);
 
     // Second call with same ID fails
-    let result = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &10_000_000,
-        &recovery_id,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&admin, &token, &recipient, &10_000_000, &recovery_id, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::Replay)));
 }
 
@@ -177,27 +136,14 @@ fn test_state_consistency() {
     // 1. Setup subscription and deposit
     token_client.mint(&subscriber, &50_000_000);
     
-    let sub_id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &10_000_000,
-        &INTERVAL,
-        &false,
-        &None, &None::<u64>);
+    let sub_id = client.create_subscription(&subscriber, &merchant, &10_000_000, &INTERVAL, &false, &None, &None::<u64>);
     
     client.deposit_funds(&sub_id, &subscriber, &50_000_000);
     
     // Total accounted should be 50M. Contract balance is 50M.
     // Try to recover 1 from accounted funds - should fail
     let rec_id = String::from_str(&env, "rec_steal");
-    let result = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &1,
-        &rec_id,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result = client.try_recover_stranded_funds(&admin, &token, &recipient, &1, &rec_id, &RecoveryReason::UserOverpayment);
     assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
 
     // 2. Stranded funds arrive (20M)
@@ -205,26 +151,12 @@ fn test_state_consistency() {
     
     // 3. Try to over-recover (21M) - fails
     let rec_id2 = String::from_str(&env, "rec_over");
-    let result2 = client.try_recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &20_000_001,
-        &rec_id2,
-        &RecoveryReason::UserOverpayment,
-    );
+    let result2 = client.try_recover_stranded_funds(&admin, &token, &recipient, &20_000_001, &rec_id2, &RecoveryReason::UserOverpayment);
     assert_eq!(result2, Err(Ok(Error::InsufficientBalance)));
 
     // 4. Exact recovery succeeds
     let rec_id3 = String::from_str(&env, "rec_exact");
-    client.recover_stranded_funds(
-        &admin,
-        &token,
-        &recipient,
-        &20_000_000,
-        &rec_id3,
-        &RecoveryReason::UserOverpayment,
-    );
+    client.recover_stranded_funds(&admin, &token, &recipient, &20_000_000, &rec_id3, &RecoveryReason::UserOverpayment);
 
     // 5. Normal operation still works (withdraw)
     client.cancel_subscription(&sub_id, &subscriber);

@@ -86,24 +86,26 @@ mod state_machine;
 mod statements;
 mod subscription;
 mod types;
-// #[cfg(test)]
-// mod test;
-// #[cfg(test)]
-// mod test_governance;
-// #[cfg(test)]
-// mod test_insufficient_balance;
-// #[cfg(test)]
-// mod test_refactor_check;
-// #[cfg(test)]
-// mod test_security;
-// #[cfg(test)]
-// mod test_multi_actor;
-// #[cfg(test)]
-// mod test_safe_math_regression;
-// #[cfg(test)]
-// mod test_usage_limits;
-// #[cfg(test)]
-// mod test_deterministic_charging;
+#[cfg(test)]
+mod test_utils;
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod test_governance;
+#[cfg(test)]
+mod test_insufficient_balance;
+#[cfg(test)]
+mod test_refactor_check;
+#[cfg(test)]
+mod test_security;
+#[cfg(test)]
+mod test_multi_actor;
+#[cfg(test)]
+mod test_safe_math_regression;
+#[cfg(test)]
+mod test_usage_limits;
+#[cfg(test)]
+mod test_deterministic_charging;
 #[cfg(test)]
 mod test_query_performance;
 

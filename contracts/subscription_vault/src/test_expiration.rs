@@ -38,16 +38,7 @@ fn test_expiration_timing_and_charging() {
     let min_topup = 1_000_000i128;
     token_admin.mint(&subscriber, &(min_topup * 2));
 
-    let sub_id = client.create_subscription_with_token(
-        &subscriber,
-        &merchant,
-        &token.address,
-        &amount,
-        &interval,
-        &false,
-        &None::<i128>,
-        &Some(expires_at),
-    );
+    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &amount, &interval, &false, &None::<i128>, &Some(expires_at, &None));
 
     client.deposit_funds(&sub_id, &subscriber, &min_topup);
 
@@ -88,16 +79,7 @@ fn test_cleanup_and_archival() {
     let min_topup = 1_000_000i128;
     token_admin.mint(&subscriber, &(min_topup * 2));
 
-    let sub_id = client.create_subscription_with_token(
-        &subscriber,
-        &merchant,
-        &token.address,
-        &100,
-        &10,
-        &false,
-        &None::<i128>,
-        &Some(1050),
-    );
+    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
 
     client.deposit_funds(&sub_id, &subscriber, &min_topup);
 
@@ -130,16 +112,7 @@ fn test_expiration_vs_cancellation() {
     let merchant = Address::generate(&env);
 
     // Scenario 1: Cancel before expiry
-    let sub_id1 = client.create_subscription_with_token(
-        &subscriber,
-        &merchant,
-        &token.address,
-        &100,
-        &10,
-        &false,
-        &None::<i128>,
-        &Some(1050),
-    );
+    let sub_id1 = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
     
     client.cancel_subscription(&sub_id1, &subscriber);
     assert_eq!(client.get_subscription(&sub_id1).status, SubscriptionStatus::Cancelled);
@@ -152,16 +125,7 @@ fn test_expiration_vs_cancellation() {
     assert_eq!(client.get_subscription(&sub_id1).status, SubscriptionStatus::Archived);
 
     // Scenario 2: Expire without cancel
-    let sub_id2 = client.create_subscription_with_token(
-        &subscriber,
-        &merchant,
-        &token.address,
-        &100,
-        &10,
-        &false,
-        &None::<i128>,
-        &Some(1050),
-    );
+    let sub_id2 = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
     
     // Trigger expiration
     env.ledger().with_mut(|l| l.timestamp = 1060);
@@ -181,16 +145,7 @@ fn test_deposit_rejected_when_expired() {
 
     token_admin.mint(&subscriber, &1000);
 
-    let sub_id = client.create_subscription_with_token(
-        &subscriber,
-        &merchant,
-        &token.address,
-        &100,
-        &10,
-        &false,
-        &None::<i128>,
-        &Some(1050),
-    );
+    let sub_id = client.create_subscription_with_token(&subscriber, &merchant, &token.address, &100, &10, &false, &None::<i128>, &Some(1050, &None));
 
     env.ledger().with_mut(|l| l.timestamp = 1050);
     let res = client.try_deposit_funds(&sub_id, &subscriber, &100);

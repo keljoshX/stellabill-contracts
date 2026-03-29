@@ -26,13 +26,7 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address) {
 fn create_subscription(env: &Env, client: &SubscriptionVaultClient) -> (u32, Address, Address) {
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>, &None::<u64>);
+    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>, &None::<u64>);
     (id, subscriber, merchant)
 }
 
