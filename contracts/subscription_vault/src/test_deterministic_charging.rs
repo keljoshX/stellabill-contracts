@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use crate::test_utils::setup::TestEnv;
-use crate::types::{ChargeExecutionResult, Error, SubscriptionStatus};
-use soroban_sdk::{testutils::Address as _, Address, BytesN, String};
+use crate::types::{ChargeExecutionResult, Error};
+use soroban_sdk::{testutils::Address as _, Address, String};
 
 #[test]
 fn test_interval_charge_determinism() {

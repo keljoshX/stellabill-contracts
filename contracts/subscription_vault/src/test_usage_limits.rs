@@ -118,6 +118,8 @@ fn test_exact_lifetime_cap_boundary() {
         &INTERVAL,
         &true,
         &Some(50_000_000i128),
+    ,
+        &None::<u64>,
     );
     client.deposit_funds(&sub_id, &subscriber, &100_000_000i128);
 

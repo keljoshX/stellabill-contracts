@@ -17,8 +17,8 @@ use crate::safe_math::{safe_add, safe_sub, safe_sub_balance};
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, ChargeExecutionResult, DataKey, Error, FundsDepositedEvent,
-    LifetimeCapReachedEvent, Subscription, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
+    BillingChargeKind, ChargeExecutionResult, DataKey, Error,
+    LifetimeCapReachedEvent, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
     SubscriptionStatus, UsageLimits, UsageState, UsageStatementEvent,
 };
 use soroban_sdk::{symbol_short, Env, String, Symbol};

@@ -15,7 +15,7 @@
 use crate::safe_math::{safe_add, safe_sub, validate_non_negative};
 use crate::types::{
     AccruedTotals, BillingChargeKind, DataKey, Error, MerchantConfig, MerchantPausedEvent,
-    MerchantUnpausedEvent, MerchantWithdrawalEvent, TokenEarnings, TokenReconciliationSnapshot,
+    MerchantUnpausedEvent, TokenEarnings, TokenReconciliationSnapshot,
 };
 use soroban_sdk::{token, Address, Env, Symbol, Vec};
 

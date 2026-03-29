@@ -33,6 +33,7 @@ fn create_subscription(env: &Env, client: &SubscriptionVaultClient) -> (u32, Add
         &INTERVAL,
         &false,
         &None::<i128>,
+        &None::<u64>,
     );
     (id, subscriber, merchant)
 }
