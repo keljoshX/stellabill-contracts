@@ -6,12 +6,36 @@
 //!
 //! - **`list_subscriptions_by_subscriber`**: Results are ordered by subscription id ascending.
 //!   `start_from_id` is inclusive. Continue with `next_start_id` when present (next id to scan).
+//!   Each call scans at most `MAX_SCAN_DEPTH` IDs — if the scan budget is exhausted before the
+//!   page is full, `next_start_id` is set to the resume point so callers can chain pages.
 //! - **`get_subscriptions_by_merchant`** / **`get_subscriptions_by_token`**: Results follow the
 //!   order of ids in the on-chain index (`MerchantSubs` / `token_subs`), which is insertion
 //!   order (ascending id order for subscriptions created through this contract). `start` is a
 //!   0-based offset into that id list. Missing subscription records are skipped; callers should
 //!   use [`get_merchant_subscription_count`] or [`get_token_subscription_count`] for the index
 //!   length, not `result.len()`, when paginating.
+//!
+//! ## Read complexity per endpoint
+//!
+//! | Endpoint | Storage reads | Notes |
+//! |---|---|---|
+//! | `get_subscription` | 1 | Direct key lookup |
+//! | `estimate_topup_for_intervals` | 1 | Calls `get_subscription` |
+//! | `get_subscriptions_by_merchant` | 1 + limit | 1 index read + up to `limit` sub reads |
+//! | `get_merchant_subscription_count` | 1 | Index length only |
+//! | `get_subscriptions_by_token` | 1 + limit | 1 index read + up to `limit` sub reads |
+//! | `get_token_subscription_count` | 1 | Index length only |
+//! | `compute_next_charge_info` | 0 | Pure computation |
+//! | `get_cap_info` | 1 | Calls `get_subscription` |
+//! | `get_plan_max_active_subs` | 1 | Direct key lookup |
+//! | `list_subscriptions_by_subscriber` | up to MAX_SCAN_DEPTH | Linear scan; capped per call |
+//!
+//! **Index deserialization note**: `get_subscriptions_by_merchant` and
+//! `get_subscriptions_by_token` read the entire index `Vec<u32>` from a single storage
+//! key before slicing it. For merchants or tokens with very large index lists the
+//! deserialization cost grows with the list length, even when only `limit` entries
+//! are needed. Use [`get_merchant_subscription_count`] / [`get_token_subscription_count`]
+//! to estimate index size before paginating.
 
 use crate::safe_math::{safe_mul, safe_sub};
 use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
@@ -20,6 +44,24 @@ use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 /// Maximum `limit` for [`get_subscriptions_by_merchant`] and [`get_subscriptions_by_token`]
 /// (aligned with [`list_subscriptions_by_subscriber`]).
 pub const MAX_SUBSCRIPTION_LIST_PAGE: u32 = 100;
+
+/// Maximum number of subscription IDs scanned in a single
+/// [`list_subscriptions_by_subscriber`] call.
+///
+/// Because `list_subscriptions_by_subscriber` performs a sequential ID scan (rather
+/// than using a secondary index), an unbounded scan over a large contract is
+/// proportionally expensive in storage reads. This constant caps the scan window
+/// per call so that any single invocation reads at most `MAX_SCAN_DEPTH` IDs.
+///
+/// When the budget is exhausted before the requested page is full, the returned
+/// `next_start_id` points to the first unscanned ID so callers can issue a
+/// follow-up call to resume. Subscribers whose subscriptions are spread sparsely
+/// over a large ID range may therefore need more round-trips to collect all IDs.
+///
+/// **Rationale**: 1 000 reads per call is the practical upper bound for a
+/// sensible contract interaction; it keeps per-call cost predictable while still
+/// allowing full enumeration via chaining.
+pub const MAX_SCAN_DEPTH: u32 = 1_000;
 
 pub fn get_subscription(env: &Env, subscription_id: u32) -> Result<Subscription, Error> {
     env.storage()
@@ -193,33 +235,73 @@ pub struct SubscriptionsPage {
 }
 
 /// Get all subscription IDs for a given subscriber with pagination support.
+///
+/// ## Complexity
+///
+/// O(min(`MAX_SCAN_DEPTH`, `next_id - start_from_id`)) storage reads per call.
+/// At most [`MAX_SCAN_DEPTH`] IDs are inspected; if the scan budget is exhausted
+/// before `limit` matching IDs are found, `next_start_id` is set to the first
+/// unscanned position so the caller can resume with another call.
+///
+/// ## Pagination
+///
+/// - `start_from_id`: inclusive lower bound on IDs to scan (use `0` for first page).
+/// - `limit`: how many matching IDs to return; must be in `1..=MAX_SUBSCRIPTION_LIST_PAGE`.
+/// - `next_start_id`: when `Some(id)`, pass it as `start_from_id` to fetch the next
+///   page.  `None` means there are no more IDs to scan in the current budget window.
+///
+/// ## Security note
+///
+/// The scan cap prevents a single transaction from performing an unbounded number
+/// of storage reads under adversarial conditions (e.g. an account with millions of
+/// subscriptions).  The cap does **not** affect correctness — it only splits work
+/// across more calls.
 pub fn list_subscriptions_by_subscriber(
     env: &Env,
     subscriber: Address,
     start_from_id: u32,
     limit: u32,
 ) -> Result<SubscriptionsPage, Error> {
-    if limit == 0 || limit > 100 {
+    if limit == 0 || limit > MAX_SUBSCRIPTION_LIST_PAGE {
         return Err(Error::InvalidInput);
     }
 
     let next_id_key = Symbol::new(env, "next_id");
     let next_id: u32 = env.storage().instance().get(&next_id_key).unwrap_or(0);
 
-    let mut subscription_ids = Vec::new(env);
-    let mut next_start_id = None;
+    // Cap the scan window to MAX_SCAN_DEPTH IDs per call.
+    // If the budget is exhausted before `limit` matches are found, `next_start_id`
+    // is set to `scan_end` so the caller can resume from exactly where we stopped.
+    let scan_end: u32 = start_from_id
+        .saturating_add(MAX_SCAN_DEPTH)
+        .min(next_id);
 
-    for id in start_from_id..next_id {
+    let mut subscription_ids = Vec::new(env);
+    let mut next_start_id: Option<u32> = None;
+
+    let mut id = start_from_id;
+    while id < scan_end {
         if let Some(sub) = env.storage().instance().get::<u32, Subscription>(&id) {
             if sub.subscriber == subscriber {
                 if subscription_ids.len() < limit {
                     subscription_ids.push_back(id);
                 } else {
+                    // Page is full; resume from this ID on the next call.
                     next_start_id = Some(id);
-                    break;
+                    return Ok(SubscriptionsPage {
+                        subscription_ids,
+                        next_start_id,
+                    });
                 }
             }
         }
+        id += 1;
+    }
+
+    // Scan budget exhausted.  If more IDs remain beyond the window, signal the
+    // caller to resume from `scan_end` (even if the current page is not full).
+    if scan_end < next_id {
+        next_start_id = Some(scan_end);
     }
 
     Ok(SubscriptionsPage {
