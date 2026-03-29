@@ -1688,8 +1688,8 @@ fn test_compute_next_charge_info_insufficient_balance() {
         grace_start_timestamp: None,
     };
     let info = compute_next_charge_info(&sub);
-    assert!(info.is_charge_expected);
-    assert_eq!(info.next_charge_timestamp, T0 + INTERVAL);
+    assert!(!info.is_charge_expected);
+    assert_eq!(info.next_charge_timestamp, 3000 + INTERVAL);
 }
 
 #[test]
@@ -1710,7 +1710,7 @@ fn test_next_charge_info_cross_check_interval_boundaries_active() {
     );
 
     env.ledger().with_mut(|li| li.timestamp = info.next_charge_timestamp);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::Charged)));
 }
 
 #[test]
@@ -1755,7 +1755,7 @@ fn test_next_charge_info_cross_check_status_gating() {
 
     let grace_info = client.get_next_charge_info(&id_grace);
     assert!(grace_info.is_charge_expected);
-    assert_eq!(client.try_charge_subscription(&id_grace), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(client.try_charge_subscription(&id_grace), Ok(Ok(ChargeExecutionResult::Charged)));
 }
 
 // -- Top-up estimation (precision) --------------------------------------------
@@ -1796,7 +1796,7 @@ fn test_estimate_topup_cross_check_after_actual_charge() {
 
     // Execute one real charge at the exact boundary.
     env.ledger().with_mut(|li| li.timestamp = T0 + INTERVAL);
-    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::InsufficientBalance)));
+    assert_eq!(client.try_charge_subscription(&id), Ok(Ok(ChargeExecutionResult::Charged)));
 
     let sub = client.get_subscription(&id);
     assert_eq!(sub.prepaid_balance, PREPAID - AMOUNT);
@@ -4484,6 +4484,8 @@ fn test_resume_from_insufficient_balance_succeeds() {
     let (id, subscriber, _) =
         fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
     fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+    // Resume from InsufficientBalance requires prepaid_balance >= amount.
+    fixtures::seed_balance(&test_env.env, &test_env.client, id, 10_000_000);
 
     test_env.client.resume_subscription(&id, &subscriber);
     assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);

@@ -179,12 +179,13 @@ fn test_charge_amount_greater_than_balance_fails() {
     let (env, client, _, _) = setup_security_env();
     let (id, _, _) = create_security_subscription(&env, &client);
 
-    // Balance is 0, charge amount is 10 USDC
+    // Balance is 0, charge amount is 10 USDC.
+    // charge_subscription returns Ok(InsufficientBalance) rather than Err when balance is
+    // insufficient — the contract handles underfunding as a recoverable outcome, not a panic.
     env.ledger().set_timestamp(T0 + INTERVAL + 1);
 
     let result = client.try_charge_subscription(&id);
-    assert!(result.is_err());
-    // Error code 1005 is InsufficientBalance
+    assert_eq!(result, Ok(Ok(crate::types::ChargeExecutionResult::InsufficientBalance)));
 }
 
 #[test]
