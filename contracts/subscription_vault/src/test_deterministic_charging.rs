@@ -14,7 +14,7 @@ fn test_interval_charge_determinism() {
     let interval = 30 * 24 * 60 * 60; // 30 days
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &amount, &interval, &false, &None);
+        .create_subscription(&subscriber, &merchant, &amount, &interval, &false, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &500_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &500_000_000i128);
@@ -41,7 +41,7 @@ fn test_usage_charge_determinism() {
     let interval = 30 * 24 * 60 * 60;
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &amount, &interval, &true, &None);
+        .create_subscription(&subscriber, &merchant, &amount, &interval, &true, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &500_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &500_000_000i128);
@@ -69,7 +69,7 @@ fn test_idempotent_failure_codes() {
 
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &100_000_000, &3600, &false, &None);
+        .create_subscription(&subscriber, &merchant, &100_000_000, &3600, &false, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &1_000_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &1_000_000_000i128);
@@ -93,7 +93,7 @@ fn test_boundary_period_transitions() {
     let interval = 3600;
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &100_000_000, &interval, &false, &None);
+        .create_subscription(&subscriber, &merchant, &100_000_000, &interval, &false, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &1_000_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &1_000_000_000i128);
@@ -127,7 +127,7 @@ fn test_same_timestamp_repeated_calls() {
     let interval = 4000;
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &50_000_000, &interval, &true, &None);
+        .create_subscription(&subscriber, &merchant, &50_000_000, &interval, &true, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &1_000_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &1_000_000_000i128);
@@ -159,7 +159,7 @@ fn test_usage_charging_parity() {
 
     let sub_id = test_env
         .client
-        .create_subscription(&subscriber, &merchant, &100_000_000, &3600, &true, &None);
+        .create_subscription(&subscriber, &merchant, &100_000_000, &3600, &true, &None, &None::<u64>);
 
     test_env.stellar_token_client().mint(&subscriber, &1_000_000_000i128);
     test_env.client.deposit_funds(&sub_id, &subscriber, &1_000_000_000i128);

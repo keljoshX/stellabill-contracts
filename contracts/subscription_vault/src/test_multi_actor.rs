@@ -44,6 +44,7 @@ fn setup_multi_actor_env() -> MultiActorSetup {
             &BATCH_INTERVAL,
             &false,
             &None,
+            &None::<u64>,
         );
         test_env
             .client

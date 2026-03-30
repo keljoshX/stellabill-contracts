@@ -33,6 +33,7 @@ pub fn create_subscription_detailed(
         &interval,
         &false,
         &None::<i128>,
+        &None::<u64>,
     );
 
     if status != SubscriptionStatus::Active {
@@ -57,6 +58,7 @@ pub fn create_subscription_with_merchant(
         &DEFAULT_INTERVAL,
         &false,
         &None::<i128>,
+        &None::<u64>,
     );
 
     if status != SubscriptionStatus::Active {
