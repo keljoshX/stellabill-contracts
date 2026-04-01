@@ -56,6 +56,8 @@ impl MigrationContract {
                     usage_enabled: sub.usage_enabled,
                     lifetime_cap: sub.lifetime_cap,
                     lifetime_charged: sub.lifetime_charged,
+                    start_time: sub.start_time,
+                    expires_at: sub.expires_at,
                 };
                 results.push_back(summary);
                 collected_count += 1;
@@ -101,6 +103,8 @@ mod test {
             usage_enabled: false,
             lifetime_cap: None,
             lifetime_charged: 0,
+            start_time: 0,
+            expires_at: None,
             grace_start_timestamp: None,
         }
     }

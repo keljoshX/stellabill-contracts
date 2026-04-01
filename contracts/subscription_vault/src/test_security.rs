@@ -35,14 +35,7 @@ fn create_security_subscription(
 ) -> (u32, Address, Address) {
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
-    let id = client.create_subscription(
-        &subscriber,
-        &merchant,
-        &AMOUNT,
-        &INTERVAL,
-        &false,
-        &None::<i128>,
-    );
+    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>, &None::<u64>);
     (id, subscriber, merchant)
 }
 
